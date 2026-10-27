@@ -12,6 +12,10 @@ import {
   profiles,
   users,
 } from "../../db/schema.js";
+import {
+  COMMUNITY_INDEX_ACTIVITY_DAYS,
+  isCommunityQualityEligible,
+} from "../../lib/searchIndexing.js";
 import { decodeCursor, encodeCursor } from "../../lib/cursor.js";
 import {
   hasAllowedOrigin,
@@ -23,7 +27,7 @@ import {
 
 const communityParamsSchema = z.object({ id: z.string().uuid() });
 const communityActionSchema = z.object({
-  action: z.enum(["archive", "restore"]),
+  action: z.enum(["archive", "restore", "enable_indexing", "disable_indexing"]),
   reason: z.string().trim().min(10).max(500),
 });
 
@@ -65,11 +69,32 @@ export async function coreCommunityRoutes(
         description: communities.description,
         status: communities.status,
         isPublic: communities.isPublic,
+        indexingApproved: communities.indexingApproved,
         createdAt: communities.createdAt,
         ownerUsername: profiles.username,
         ownerDisplayName: profiles.displayName,
         memberCount: sql<number>`count(distinct ${communityMemberships.userId}) filter (where ${users.deletedAt} is null and ${users.suspendedAt} is null)`,
         postCount: sql<number>`count(distinct ${posts.id}) filter (where ${posts.deletedAt} is null)`,
+        eligiblePostCount: sql<number>`(
+          select count(*)::int
+          from ${posts} as seo_posts
+          inner join ${users} as seo_authors on seo_authors.id = seo_posts.author_id
+          where seo_posts.community_id = ${communities.id}
+            and seo_posts.deleted_at is null
+            and seo_authors.deleted_at is null
+            and seo_authors.suspended_at is null
+            and seo_posts.created_at >= now() - (${COMMUNITY_INDEX_ACTIVITY_DAYS} * interval '1 day')
+        )`,
+        eligibleAuthorCount: sql<number>`(
+          select count(distinct seo_posts.author_id)::int
+          from ${posts} as seo_posts
+          inner join ${users} as seo_authors on seo_authors.id = seo_posts.author_id
+          where seo_posts.community_id = ${communities.id}
+            and seo_posts.deleted_at is null
+            and seo_authors.deleted_at is null
+            and seo_authors.suspended_at is null
+            and seo_posts.created_at >= now() - (${COMMUNITY_INDEX_ACTIVITY_DAYS} * interval '1 day')
+        )`,
       })
       .from(communities)
       .leftJoin(
@@ -87,6 +112,7 @@ export async function coreCommunityRoutes(
         communities.description,
         communities.status,
         communities.isPublic,
+        communities.indexingApproved,
         communities.createdAt,
         profiles.username,
         profiles.displayName,
@@ -101,6 +127,8 @@ export async function coreCommunityRoutes(
         ...community,
         memberCount: Number(community.memberCount),
         postCount: Number(community.postCount),
+        eligiblePostCount: Number(community.eligiblePostCount),
+        eligibleAuthorCount: Number(community.eligibleAuthorCount),
       })),
       nextCursor:
         hasMore && lastItem
@@ -122,6 +150,8 @@ export async function coreCommunityRoutes(
       .select({
         id: communities.id,
         status: communities.status,
+        isPublic: communities.isPublic,
+        indexingApproved: communities.indexingApproved,
       })
       .from(communities)
       .where(eq(communities.id, parsedParams.data.id))
@@ -138,7 +168,9 @@ export async function coreCommunityRoutes(
     const { action, reason } = parsedBody.data;
     if (
       (action === "archive" && community.status === "archived") ||
-      (action === "restore" && community.status === "active")
+      (action === "restore" && community.status === "active") ||
+      (action === "enable_indexing" && community.indexingApproved) ||
+      (action === "disable_indexing" && !community.indexingApproved)
     ) {
       return reply.code(409).send({
         error: {
@@ -148,18 +180,46 @@ export async function coreCommunityRoutes(
       });
     }
 
+    if (
+      action === "enable_indexing" &&
+      !(await isCommunityQualityEligible(community.id))
+    ) {
+      return reply.code(409).send({
+        error: {
+          code: "COMMUNITY_NOT_SEO_ELIGIBLE",
+          message:
+            "The community must be public, active, have a meaningful description, and meet the recent post and author thresholds before indexing can be enabled.",
+        },
+      });
+    }
+
     await database.transaction(async (transaction) => {
-      const status = action === "archive" ? "archived" : "active";
+      const status =
+        action === "archive"
+          ? "archived"
+          : action === "restore"
+            ? "active"
+            : community.status;
+      const indexingApproved =
+        action === "enable_indexing"
+          ? true
+          : action === "disable_indexing"
+            ? false
+            : community.indexingApproved;
       await transaction
         .update(communities)
-        .set({ status, updatedAt: new Date() })
+        .set({ status, indexingApproved, updatedAt: new Date() })
         .where(eq(communities.id, community.id));
       await transaction.insert(coreAdminActions).values({
         actorId,
         targetType: "community",
         targetId: community.id,
         action,
-        details: { reason },
+        details: {
+          reason,
+          indexingApproved,
+          status,
+        },
       });
       await transaction.insert(moderationActions).values({
         actorId,
@@ -172,7 +232,18 @@ export async function coreCommunityRoutes(
     });
     return {
       success: true,
-      status: action === "archive" ? "archived" : "active",
+      status:
+        action === "archive"
+          ? "archived"
+          : action === "restore"
+            ? "active"
+            : community.status,
+      indexingApproved:
+        action === "enable_indexing"
+          ? true
+          : action === "disable_indexing"
+            ? false
+            : community.indexingApproved,
     };
   });
 }

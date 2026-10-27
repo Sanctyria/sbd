@@ -1,0 +1,2 @@
+ALTER TABLE "communities" ADD COLUMN "indexing_approved" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+ALTER TABLE "profiles" ADD COLUMN "is_indexing_opted_in" boolean DEFAULT false NOT NULL;

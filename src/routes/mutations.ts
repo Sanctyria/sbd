@@ -168,6 +168,8 @@ const profileUpdateSchema = z
     displayName: z.string().trim().min(1).max(60).optional(),
     bio: z.string().trim().max(300).optional(),
     avatarUrl: httpsUrlSchema.nullable().optional(),
+    bannerUrl: httpsUrlSchema.nullable().optional(),
+    indexingOptedIn: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0);
 const createCommunitySchema = z.object({
@@ -1887,8 +1889,15 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .join("");
     }
     if (body.data.bio !== undefined) updates.bio = body.data.bio;
+    if (body.data.indexingOptedIn !== undefined) {
+      updates.isIndexingOptedIn = body.data.indexingOptedIn;
+    }
     if (Object.hasOwn(body.data, "avatarUrl")) {
       updates.avatarUrl = body.data.avatarUrl ?? null;
+      updates.avatarVersion = new Date().toISOString();
+    }
+    if (Object.hasOwn(body.data, "bannerUrl")) {
+      updates.bannerUrl = body.data.bannerUrl ?? null;
       updates.avatarVersion = new Date().toISOString();
     }
     const [profile] = await database.transaction(async (transaction) => {
@@ -1902,8 +1911,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           bio: profiles.bio,
           avatarUrl: profiles.avatarUrl,
           avatarVersion: profiles.avatarVersion,
+          bannerUrl: profiles.bannerUrl,
           initials: profiles.initials,
           avatarColor: profiles.avatarColor,
+          isIndexingOptedIn: profiles.isIndexingOptedIn,
         });
       if (updatedProfile) {
         await transaction.insert(outboxEvents).values({
@@ -3482,7 +3493,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     };
     response.once("close", closeStream);
     response.once("finish", closeStream);
-    durationTimer = setTimeout(() => response.end(), MAX_EVENT_STREAM_DURATION_MS);
+    durationTimer = setTimeout(
+      () => response.end(),
+      MAX_EVENT_STREAM_DURATION_MS,
+    );
 
     const poll = async () => {
       if (closed) return;

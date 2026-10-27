@@ -4,10 +4,11 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 
 ## Features
 
-- Account signup/login, HTTP-only sessions, and profile management.
+- Account signup/login, HTTP-only sessions, and profile management, including HTTPS avatar and banner image URLs.
 - Public communities, membership, posts, nested replies, reactions, votes, bookmarks, and notifications.
 - Community-owner moderation and global Core administration with audited actions.
 - Journal CMS, community announcement banners, and aggregated analytics.
+- Audited search-index approvals for communities and explicit profile indexing opt-in.
 - Cursor-paginated APIs and server-sent community events.
 - HTTPS link metadata previews with guarded public-host fetching.
 
@@ -79,10 +80,12 @@ Configuration is loaded from environment variables and validated at startup.
 | `DATABASE_URL`              | Yes      | —                       | PostgreSQL connection URL.                                                            |
 | `SESSION_COOKIE_NAME`       | No       | `sanctyria_session`     | Name of the HTTP-only session cookie.                                                 |
 | `SESSION_COOKIE_SECURE`     | No       | Environment-dependent   | Set `true` behind HTTPS; use `false` only for local HTTP development.                 |
+| `SENTRY_DSN`                | No       | Empty                   | Optional Sentry backend project DSN. Captures scrubbed server errors when configured. |
 | `CORE_ADMIN_USER_IDS`       | No       | Empty                   | Comma-separated UUIDs authorized for global Core administration.                      |
 | `CORE_SUPER_ADMIN_USER_IDS` | No       | Empty                   | Comma-separated subset of Core admins authorized for permanent account anonymization. |
 
 Keep all production credentials in a secret manager. Do not commit `.env`, database URLs, session secrets, or generated demo account files.
+When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with request data, user data, breadcrumbs, and exception messages removed. Review the Sentry project’s data-retention and access settings before enabling it in production.
 
 ## Commands
 
@@ -106,11 +109,12 @@ All API routes are under `/api/v1`.
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
 | Health                   | `GET /health`, `GET /ready`                                                                                                     |
 | Authentication           | `POST /auth/signup`, `POST /auth/login`, `GET /me`, `DELETE /auth/session`                                                      |
-| Profiles                 | `GET /profiles/:username`, profile activity and connections, `PATCH /me/profile`, follow/unfollow                               |
+| Profiles                 | `GET /profiles/:username`, profile activity and connections, `PATCH /me/profile` (including avatar and banner URLs), follow/unfollow |
 | Communities              | `GET /communities`, `GET /communities/:slug`, membership, members, and community creation/update                                |
 | Feed and content         | `GET /feed`, `GET /posts/:id`, replies, reactions, votes, bookmarks, and reports                                                |
 | Notifications and events | `GET /notifications`, notification reads, and `GET /events` (SSE)                                                               |
 | Search and previews      | `GET /search`, `GET /link-preview?url=...`                                                                                      |
+| SEO                      | `GET /seo/sitemap` returns eligible public communities, posts, and opted-in profiles                                            |
 | Marketing                | Published journal reads and `/community/banners`                                                                                |
 | Core administration      | `/core/overview`, `/core/users`, `/core/communities`, `/core/moderation`, `/core/marketing`, `/core/banners`, `/core/analytics` |
 
@@ -128,6 +132,53 @@ The Drizzle schema is in `src/db/schema.ts`; ordered PostgreSQL SQL migrations a
 4. Apply migrations with `npm run db:migrate` in each target environment.
 
 Do not edit applied migrations to change an existing deployment's schema; add a new migration instead. Take a database backup before production migrations.
+
+Search indexing is disabled by default for all communities and profiles. Core staff can approve an eligible community only when it is public/active, has an 80-character description, and has at least 10 non-deleted posts from at least 3 active authors in the trailing 90 days. Posts are indexable only within such communities and while the post and author remain eligible. Profiles require explicit member opt-in, an active account, a 20-character bio, and at least one eligible public post. Apply the migration before using the Core approval controls.
+
+### Moving the production database to another Neon account
+
+To preserve the data currently in production, **clone/migrate the PostgreSQL database; do not run `npm run db:seed`**. The seed command is for local demo data and is intentionally disabled in production. A database dump preserves account/profile records, password hashes, communities, posts, moderation history, analytics, and the Drizzle migration ledger.
+
+1. **Check the source and target.** In the current Neon account, note the source PostgreSQL version, database size, database name, role, and region. Create a target Neon project close to the backend VPS, with the same PostgreSQL major version. Confirm the target plan has enough storage and network transfer for the dump and application.
+2. **Prepare the target project.** Use its default database and role, or create a target database/role first. Keep both projects available until the new backend has been verified. Use the source's **direct/unpooled** connection endpoint for `pg_dump`; Neon documents that pooled endpoints should not be used for `pg_dump`.
+3. **Take a protected backup.** Use the PostgreSQL client tools matching the source major version or newer. From a trusted machine with network access to both Neon projects, set `PGSSLMODE=require` and run the commands below, substituting the host, role, database, and dump-file placeholders. `--password` prompts interactively; do not put passwords or complete connection URLs in shell commands, tickets, logs, or this repository.
+
+   ```powershell
+   $env:PGSSLMODE = "require"
+
+   pg_dump `
+     --host="<SOURCE_UNPOOLED_HOST>" `
+     --username="<SOURCE_ROLE>" `
+     --dbname="<SOURCE_DATABASE>" `
+     --format=custom `
+     --no-owner `
+     --no-acl `
+     --password `
+     --file="sanctyria-production.dump"
+   ```
+
+4. **Pause writes for the final copy.** For the final cutover, enable maintenance mode or temporarily stop the Render backend and any other writers. This avoids missing writes made after the dump. For a small beta database, a short maintenance window and one final dump/restore is simpler and safer than setting up replication.
+5. **Restore into the target database.** The target database should be empty. `pg_restore` will prompt for the target role password. Do not use `--clean` against a database containing anything you want to keep.
+
+   ```powershell
+   pg_restore `
+     --host="<TARGET_HOST>" `
+     --username="<TARGET_ROLE>" `
+     --dbname="<TARGET_DATABASE>" `
+     --no-owner `
+     --no-acl `
+     --exit-on-error `
+     --verbose `
+     --password `
+     "sanctyria-production.dump"
+   ```
+
+6. **Verify before switching traffic.** Check the restore completed without errors and compare representative row counts between source and target, including `users`, `profiles`, `communities`, `community_memberships`, `posts`, `replies`, `reports`, `marketing_articles`, and `daily_analytics`. Confirm the Drizzle migration ledger was restored. Test login, existing sessions, signup, writes, Core administration, and `/api/v1/ready` with a temporary backend configured to use the target database.
+7. **Cut over.** Update the VPS backend's secret `DATABASE_URL` to the target project's connection string, then restart/deploy the backend. Point the frontend proxy's `COMMUNITY_BACKEND_URL` to the VPS API as a separate cutover setting. Confirm health/readiness and production flows before disabling maintenance mode.
+8. **Keep rollback safe.** Retain the old Neon project and the protected dump until the new setup is stable. Do not allow both old and new backends to accept writes against separate database copies after cutover; they will diverge. If rollback is needed after target writes begin, stop writes and plan how to reconcile those writes before switching back.
+9. **Protect and dispose of the dump.** It contains sensitive production data, including password hashes. Restrict its file permissions, keep it off public/shared storage, encrypt it if it must be transferred or retained, verify a usable backup exists, then securely remove temporary copies.
+
+After a **full database restore**, do not run `npm run db:migrate` just to reproduce the schema: the migration ledger is part of the restored database. Run migrations only if the application has additional migrations that were not applied to the source before the dump. A fresh, empty database is a different setup; for that case, apply the repository migrations rather than importing a production dump.
 
 ## Ember
 

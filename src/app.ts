@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import * as Sentry from "@sentry/node";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
@@ -18,6 +19,32 @@ const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
 export async function buildApp(
   config: Environment = environment,
 ): Promise<FastifyInstance> {
+  if (config.SENTRY_DSN) {
+    Sentry.init({
+      dsn: config.SENTRY_DSN,
+      environment: config.NODE_ENV,
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        urlQueryParams: false,
+      },
+      beforeSend(event) {
+        delete event.user;
+        delete event.request;
+        delete event.breadcrumbs;
+        delete event.extra;
+        delete event.contexts;
+        delete event.message;
+        delete event.logentry;
+        for (const exception of event.exception?.values ?? []) {
+          exception.value = exception.type ?? "Error";
+        }
+        return event;
+      },
+    });
+  }
   const app = Fastify({
     logger: config.NODE_ENV !== "test",
     bodyLimit: 1_048_576,
@@ -33,6 +60,11 @@ export async function buildApp(
         : 500;
     const statusCode =
       errorStatusCode >= 400 && errorStatusCode < 500 ? errorStatusCode : 500;
+    if (statusCode === 500 && config.SENTRY_DSN) {
+      Sentry.captureException(error, {
+        tags: { method: request.method, status_code: statusCode },
+      });
+    }
     const code =
       statusCode === 404
         ? "NOT_FOUND"
@@ -108,6 +140,7 @@ export async function buildApp(
     if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
     await cleanupTask;
     await pool.end();
+    if (config.SENTRY_DSN) await Sentry.flush(2_000);
   });
 
   app.get("/api/v1/health", async () => ({ status: "ok" }));

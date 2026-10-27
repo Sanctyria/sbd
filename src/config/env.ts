@@ -11,6 +11,10 @@ const environmentSchema = z
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
     SESSION_COOKIE_NAME: z.string().min(1).default("sanctyria_session"),
     SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
+    SENTRY_DSN: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().url().optional(),
+    ),
     CORE_ADMIN_USER_IDS: z
       .string()
       .default("")

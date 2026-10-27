@@ -5,6 +5,7 @@ import {
   count,
   desc,
   eq,
+  exists,
   gte,
   ilike,
   inArray,
@@ -42,6 +43,12 @@ import {
   users,
 } from "../db/schema.js";
 import { decodeCursor, encodeCursor } from "../lib/cursor.js";
+import {
+  PROFILE_INDEX_MIN_BIO_LENGTH,
+  communityIndexingConditions,
+  isCommunityIndexable,
+  isProfileIndexable,
+} from "../lib/searchIndexing.js";
 
 const pageLimit = 30;
 const maxPageLimit = 50;
@@ -60,6 +67,9 @@ const profileActivityQuerySchema = pageQuerySchema.extend({
 });
 
 const profileConnectionsQuerySchema = pageQuerySchema;
+const seoSitemapQuerySchema = z.object({
+  limit: z.coerce.number().int().min(0).max(50_000).default(50_000),
+});
 
 const notificationsQuerySchema = pageQuerySchema.extend({
   unread: z.enum(["true", "false"]).optional(),
@@ -521,6 +531,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         bannerUrl: communities.bannerUrl,
         websiteUrl: communities.websiteUrl,
         createdAt: communities.createdAt,
+        updatedAt: communities.updatedAt,
         memberCount: viewerId
           ? sql<number>`count(${communityMemberships.userId}) filter (where not exists (
               select 1 from ${userBlocks} as membership_block
@@ -577,14 +588,109 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const indexable = await isCommunityIndexable(community.id);
     reply.header(
       "cache-control",
       viewerId
         ? "private, no-store"
         : "public, max-age=0, s-maxage=10, stale-while-revalidate=30",
     );
-    return { community };
+    return { community: { ...community, indexable } };
   });
+
+  app.get(
+    "/api/v1/seo/sitemap",
+    { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const parsedQuery = seoSitemapQuerySchema.safeParse(request.query);
+      if (!parsedQuery.success) return invalidRequest(reply);
+      let remaining = parsedQuery.data.limit;
+
+      const indexableCommunities = await database
+        .select({
+          slug: communities.slug,
+          updatedAt: communities.updatedAt,
+        })
+        .from(communities)
+        .where(and(...communityIndexingConditions()))
+        .orderBy(desc(communities.updatedAt), desc(communities.id))
+        .limit(remaining);
+      remaining -= indexableCommunities.length;
+
+      const indexablePosts =
+        remaining > 0
+          ? await database
+              .select({
+                id: posts.id,
+                updatedAt: posts.updatedAt,
+              })
+              .from(posts)
+              .innerJoin(communities, eq(communities.id, posts.communityId))
+              .innerJoin(users, eq(users.id, posts.authorId))
+              .where(
+                and(
+                  isNull(posts.deletedAt),
+                  isNull(users.deletedAt),
+                  isNull(users.suspendedAt),
+                  ...communityIndexingConditions(),
+                ),
+              )
+              .orderBy(desc(posts.updatedAt), desc(posts.id))
+              .limit(remaining)
+          : [];
+      remaining -= indexablePosts.length;
+
+      const indexableProfiles =
+        remaining > 0
+          ? await database
+              .select({
+                username: profiles.username,
+                updatedAt: profiles.updatedAt,
+              })
+              .from(profiles)
+              .innerJoin(users, eq(users.id, profiles.userId))
+              .where(
+                and(
+                  eq(profiles.isIndexingOptedIn, true),
+                  isNull(users.deletedAt),
+                  isNull(users.suspendedAt),
+                  sql`length(btrim(${profiles.bio})) >= ${PROFILE_INDEX_MIN_BIO_LENGTH}`,
+                  exists(
+                    database
+                      .select({ id: posts.id })
+                      .from(posts)
+                      .innerJoin(
+                        communities,
+                        eq(communities.id, posts.communityId),
+                      )
+                      .innerJoin(users, eq(users.id, posts.authorId))
+                      .where(
+                        and(
+                          eq(posts.authorId, profiles.userId),
+                          isNull(posts.deletedAt),
+                          isNull(users.deletedAt),
+                          isNull(users.suspendedAt),
+                          ...communityIndexingConditions(),
+                        ),
+                      ),
+                  ),
+                ),
+              )
+              .orderBy(desc(profiles.updatedAt), desc(profiles.userId))
+              .limit(remaining)
+          : [];
+
+      reply.header(
+        "cache-control",
+        "public, max-age=300, stale-while-revalidate=600",
+      );
+      return {
+        communities: indexableCommunities,
+        posts: indexablePosts,
+        profiles: indexableProfiles,
+      };
+    },
+  );
 
   app.get("/api/v1/communities/:slug/members", async (request, reply) => {
     const parsedParams = slugParamsSchema.safeParse(request.params);
@@ -720,11 +826,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         bio: profiles.bio,
         avatarUrl: profiles.avatarUrl,
         avatarVersion: profiles.avatarVersion,
+        bannerUrl: profiles.bannerUrl,
         initials: profiles.initials,
         avatarColor: profiles.avatarColor,
         ember: profiles.ember,
         verified: profiles.isVerified,
         createdAt: profiles.createdAt,
+        indexingOptedIn: profiles.isIndexingOptedIn,
       })
       .from(profiles)
       .innerJoin(users, eq(profiles.userId, users.id))
@@ -742,6 +850,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const indexable = await isProfileIndexable(
+      profile.userId,
+      profile.indexingOptedIn,
+      profile.bio,
+    );
     const memberships = await database
       .select({
         slug: communities.slug,
@@ -852,10 +965,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     }
 
     reply.header("cache-control", "private, no-store");
-    const { userId, ...profileData } = profile;
+    const { userId, indexingOptedIn, ...profileData } = profile;
     return {
       profile: {
         ...profileData,
+        ...(viewerId === profile.userId ? { indexingOptedIn } : {}),
+        indexable,
         communities: memberships,
         followerCount: followerCount?.value ?? 0,
         followingCount: followingCount?.value ?? 0,
@@ -1678,6 +1793,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           : sql<boolean>`false`,
         body: sql<string>`case when ${replies.deletedAt} is null then ${replies.body} else '' end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (
           select 1 from ${communityMemberships} as reply_owner
           where reply_owner.community_id = ${posts.communityId}
@@ -1826,6 +1942,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             ? sql<boolean>`exists (select 1 from ${userFollows} where ${userFollows.followerId} = ${viewerId} and ${userFollows.followedId} = ${users.id})`
             : sql<boolean>`false`,
         },
+        authorIsActive: sql<boolean>`${users.deletedAt} is null and ${users.suspendedAt} is null`,
       })
       .from(posts)
       .innerJoin(communities, eq(posts.communityId, communities.id))
@@ -1839,6 +1956,9 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    const { authorIsActive, ...postData } = post;
+    const indexable =
+      authorIsActive && (await isCommunityIndexable(post.community.id));
 
     const replyRows = await database
       .select({
@@ -1855,6 +1975,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           : sql<boolean>`false`,
         body: sql<string>`case when ${replies.deletedAt} is null then ${replies.body} else '' end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (
           select 1 from ${communityMemberships} as reply_owner
           where reply_owner.community_id = ${posts.communityId}
@@ -1926,7 +2047,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         : "public, max-age=0, s-maxage=5, stale-while-revalidate=15",
     );
     return {
-      post,
+      post: { ...postData, indexable },
       replies: postReplies.reverse(),
       nextRepliesCursor: repliesCursor,
     };
