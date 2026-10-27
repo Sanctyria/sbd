@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: sanctyria
+      POSTGRES_USER: sanctyria
+      POSTGRES_PASSWORD: sanctyria_dev_only
+    ports:
+      - "54329:5432"
+    volumes:
+      - sanctyria-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanctyria -d sanctyria"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  sanctyria-postgres:

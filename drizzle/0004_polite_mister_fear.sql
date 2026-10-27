@@ -1,0 +1,3 @@
+ALTER TABLE "moderation_actions" ADD COLUMN "community_id" uuid;--> statement-breakpoint
+ALTER TABLE "moderation_actions" ADD CONSTRAINT "moderation_actions_community_id_communities_id_fk" FOREIGN KEY ("community_id") REFERENCES "public"."communities"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "moderation_actions_community_idx" ON "moderation_actions" USING btree ("community_id","created_at");

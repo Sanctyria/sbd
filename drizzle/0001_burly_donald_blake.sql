@@ -1,0 +1,2 @@
+CREATE INDEX "communities_public_cursor_idx" ON "communities" USING btree ("is_public","status","created_at","id");--> statement-breakpoint
+CREATE INDEX "posts_public_feed_idx" ON "posts" USING btree ("created_at","id");

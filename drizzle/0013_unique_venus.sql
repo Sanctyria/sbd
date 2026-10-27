@@ -1,0 +1,1 @@
+ALTER TABLE "posts" ADD COLUMN "downvote_count" integer DEFAULT 0 NOT NULL;

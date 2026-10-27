@@ -1,0 +1,118 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1792852701944,
+      "tag": "0000_fluffy_the_stranger",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1792852765357,
+      "tag": "0001_burly_donald_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792854527546,
+      "tag": "0002_shallow_colleen_wing",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1792862956860,
+      "tag": "0003_calm_lilith",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1792917566116,
+      "tag": "0004_polite_mister_fear",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1792972800000,
+      "tag": "0005_seed_community_owners",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1792972800001,
+      "tag": "0006_community_slug_aliases",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1792972800002,
+      "tag": "0007_community_member_safety",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1792972800003,
+      "tag": "0008_community_member_moderation_mutes",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1792972800004,
+      "tag": "0009_request_idempotency",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793002489351,
+      "tag": "0010_core_admin_cms_analytics",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1793005005900,
+      "tag": "0011_tiny_jack_power",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1793016839723,
+      "tag": "0012_kind_eddie_brock",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793018252149,
+      "tag": "0013_unique_venus",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1793018418662,
+      "tag": "0014_melted_randall_flagg",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1793039219086,
+      "tag": "0015_glorious_echo",
+      "breakpoints": true
+    }
+  ]
+}

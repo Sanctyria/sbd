@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.env
+accounts.md
+coverage/
+drizzle/meta/_journal.json.tmp

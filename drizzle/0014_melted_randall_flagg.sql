@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "post_reactions_single_vote_idx" ON "post_reactions" USING btree ("user_id","post_id") WHERE "post_reactions"."type" in ('like', 'downvote');
