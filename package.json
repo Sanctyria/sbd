@@ -15,7 +15,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:seed": "tsx src/db/seed.ts",
-    "db:verify-seed": "tsx src/db/verifySeed.ts"
+    "db:verify-seed": "tsx src/db/verifySeed.ts",
+    "seo:indexnow:submit": "tsx src/scripts/submitIndexNow.ts"
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.3",

@@ -69,6 +69,19 @@ export async function isCommunityIndexable(
   return Boolean(community);
 }
 
+export async function getIndexableCommunitySlug(
+  communityId: string,
+): Promise<string | null> {
+  const [community] = await database
+    .select({ slug: communities.slug })
+    .from(communities)
+    .where(
+      and(eq(communities.id, communityId), ...communityIndexingConditions()),
+    )
+    .limit(1);
+  return community?.slug ?? null;
+}
+
 export async function isProfileIndexable(
   userId: string,
   optedIn: boolean,

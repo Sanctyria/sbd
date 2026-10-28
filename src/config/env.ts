@@ -15,6 +15,10 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.string().url().optional(),
     ),
+    INDEXNOW_KEY: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().regex(/^[A-Za-z0-9-]{8,128}$/).optional(),
+    ),
     CORE_ADMIN_USER_IDS: z
       .string()
       .default("")

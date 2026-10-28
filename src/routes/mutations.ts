@@ -22,7 +22,12 @@ import {
   recordPostEmberRemoval,
   recordReplyEmberRemoval,
 } from "../lib/ember.js";
+import { indexNowPageUrl, notifyIndexNow } from "../lib/indexNow.js";
 import { extractMentionUsernames } from "../lib/mentions.js";
+import {
+  getIndexableCommunitySlug,
+  isProfileIndexable,
+} from "../lib/searchIndexing.js";
 import {
   bookmarks,
   communities,
@@ -860,6 +865,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "REPORT_NOT_FOUND", message: "Report not found." },
       });
     }
+    const indexableCommunitySlug = body.data.removeContent
+      ? await getIndexableCommunitySlug(manageable.communityId)
+      : null;
 
     const [updatedReport] = await database.transaction(async (transaction) => {
       const [updated] = await transaction
@@ -942,6 +950,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "REPORT_NOT_FOUND", message: "Report not found." },
       });
+    }
+    if (updatedReport && body.data.removeContent && indexableCommunitySlug) {
+      notifyIndexNow(
+        [indexNowPageUrl(`/p/${encodeURIComponent(manageable.postId)}`)],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
     }
     return { report: updatedReport };
   });
@@ -1465,6 +1481,20 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           : communitySlugFromName(body.data.name);
       if (requestedSlug === null) return invalidRequest(reply);
 
+      const [communityBefore] = await database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      const indexableCommunitySlugBefore = communityBefore
+        ? await getIndexableCommunitySlug(communityBefore.id)
+        : null;
       const result = await database.transaction(async (transaction) => {
         const [community] = await transaction
           .select({
@@ -1585,6 +1615,24 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             message: "That community name is already in use.",
           },
         });
+      }
+      const indexableCommunitySlug = await getIndexableCommunitySlug(result.community.id);
+      const urls = [
+        ...new Set(
+          [indexableCommunitySlugBefore, indexableCommunitySlug]
+            .filter((slug): slug is string => Boolean(slug))
+            .map((slug) =>
+              indexNowPageUrl(`/r/${encodeURIComponent(slug)}`),
+            ),
+        ),
+      ];
+      if (urls.length) {
+        notifyIndexNow(
+          urls,
+          environment.INDEXNOW_KEY,
+          request.log,
+          environment.NODE_ENV === "production",
+        );
       }
       return { community: result.community };
     },
@@ -1796,6 +1844,20 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       const params = slugParamsSchema.safeParse(request.params);
       if (!params.success) return invalidRequest(reply);
 
+      const [communityBefore] = await database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      const indexableCommunitySlugBefore = communityBefore
+        ? await getIndexableCommunitySlug(communityBefore.id)
+        : null;
       const result = await database.transaction(async (transaction) => {
         const [community] = await transaction
           .select({
@@ -1867,6 +1929,18 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
+      if (indexableCommunitySlugBefore) {
+        notifyIndexNow(
+          [
+            indexNowPageUrl(
+              `/r/${encodeURIComponent(indexableCommunitySlugBefore)}`,
+            ),
+          ],
+          environment.INDEXNOW_KEY,
+          request.log,
+          environment.NODE_ENV === "production",
+        );
+      }
       return reply.code(204).send();
     },
   );
@@ -1876,6 +1950,23 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!userId) return;
     const body = profileUpdateSchema.safeParse(request.body);
     if (!body.success) return invalidRequest(reply);
+
+    const [existingProfile] = await database
+      .select({
+        username: profiles.username,
+        bio: profiles.bio,
+        indexingOptedIn: profiles.isIndexingOptedIn,
+      })
+      .from(profiles)
+      .where(eq(profiles.userId, userId))
+      .limit(1);
+    const wasIndexable = existingProfile
+      ? await isProfileIndexable(
+          userId,
+          existingProfile.indexingOptedIn,
+          existingProfile.bio,
+        )
+      : false;
 
     const updates: Partial<typeof profiles.$inferInsert> = {
       updatedAt: new Date(),
@@ -1930,6 +2021,23 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "PROFILE_NOT_FOUND", message: "Profile not found." },
       });
+    }
+    const isIndexable = await isProfileIndexable(
+      userId,
+      profile.isIndexingOptedIn,
+      profile.bio,
+    );
+    if (wasIndexable || isIndexable) {
+      notifyIndexNow(
+        [
+          indexNowPageUrl(
+            `/u/${encodeURIComponent(profile.username)}`,
+          ),
+        ],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
     }
     return { profile };
   });
@@ -2225,6 +2333,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         body.data,
       );
       if (idempotency === undefined) return;
+      const indexableCommunitySlug = await getIndexableCommunitySlug(
+        community.id,
+      );
 
       try {
         const result = await database.transaction(async (transaction) => {
@@ -2716,6 +2827,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       if (result.kind === "idempotency") {
         return sendIdempotencyClaim(reply, result.claim);
       }
+      if (result.post && indexableCommunitySlug) {
+        notifyIndexNow(
+          [indexNowPageUrl(`/p/${encodeURIComponent(result.post.id)}`)],
+          environment.INDEXNOW_KEY,
+          request.log,
+          environment.NODE_ENV === "production",
+        );
+      }
       return reply.code(201).send({ post: result.post });
     },
   );
@@ -2733,6 +2852,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    const indexableCommunitySlug = await getIndexableCommunitySlug(
+      post.communityId,
+    );
 
     const nextBody = body.data.body ?? post.body;
     const nextUrl = body.data.url === undefined ? post.url : body.data.url;
@@ -2774,6 +2896,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    if (indexableCommunitySlug) {
+      notifyIndexNow(
+        [indexNowPageUrl(`/p/${encodeURIComponent(post.id)}`)],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
+    }
     return { post: updatedPost };
   });
 
@@ -2789,6 +2919,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    const indexableCommunitySlug = await getIndexableCommunitySlug(
+      post.communityId,
+    );
 
     const deleted = await database.transaction(async (transaction) => {
       const [removed] = await transaction
@@ -2815,6 +2948,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
+    }
+    if (indexableCommunitySlug) {
+      notifyIndexNow(
+        [indexNowPageUrl(`/p/${encodeURIComponent(post.id)}`)],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
     }
     return reply.code(204).send();
   });
@@ -2859,6 +3000,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .innerJoin(profiles, eq(profiles.userId, posts.authorId))
         .where(eq(posts.id, params.data.id))
         .limit(1);
+      const indexableCommunitySlug =
+        await getIndexableCommunitySlug(communityId);
       const parentAuthor = body.data.parentReplyId
         ? await database
             .select({ userId: replies.authorId })
@@ -3029,6 +3172,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       if (result.kind === "idempotency") {
         return sendIdempotencyClaim(reply, result.claim);
       }
+      if (result.reply && indexableCommunitySlug) {
+        notifyIndexNow(
+          [indexNowPageUrl(`/p/${encodeURIComponent(params.data.id)}`)],
+          environment.INDEXNOW_KEY,
+          request.log,
+          environment.NODE_ENV === "production",
+        );
+      }
       return reply.code(201).send({ reply: result.reply });
     },
   );
@@ -3046,6 +3197,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });
     }
+    const indexableCommunitySlug = await getIndexableCommunitySlug(
+      target.communityId,
+    );
 
     const [updated] = await database.transaction(async (transaction) => {
       const [result] = await transaction
@@ -3072,6 +3226,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });
     }
+    if (indexableCommunitySlug) {
+      notifyIndexNow(
+        [indexNowPageUrl(`/p/${encodeURIComponent(target.postId)}`)],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
+    }
     return { reply: updated };
   });
 
@@ -3087,6 +3249,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });
     }
+    const indexableCommunitySlug = await getIndexableCommunitySlug(
+      target.communityId,
+    );
 
     const [deleted] = await database.transaction(async (transaction) => {
       const [result] = await transaction
@@ -3113,6 +3278,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });
+    }
+    if (indexableCommunitySlug) {
+      notifyIndexNow(
+        [indexNowPageUrl(`/p/${encodeURIComponent(target.postId)}`)],
+        environment.INDEXNOW_KEY,
+        request.log,
+        environment.NODE_ENV === "production",
+      );
     }
     return reply.code(204).send();
   });

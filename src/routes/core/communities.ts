@@ -14,8 +14,10 @@ import {
 } from "../../db/schema.js";
 import {
   COMMUNITY_INDEX_ACTIVITY_DAYS,
+  getIndexableCommunitySlug,
   isCommunityQualityEligible,
 } from "../../lib/searchIndexing.js";
+import { indexNowPageUrl, notifyIndexNow } from "../../lib/indexNow.js";
 import { decodeCursor, encodeCursor } from "../../lib/cursor.js";
 import {
   hasAllowedOrigin,
@@ -164,6 +166,9 @@ export async function coreCommunityRoutes(
         },
       });
     }
+    const previouslyIndexableSlug = await getIndexableCommunitySlug(
+      community.id,
+    );
 
     const { action, reason } = parsedBody.data;
     if (
@@ -230,6 +235,23 @@ export async function coreCommunityRoutes(
         reason,
       });
     });
+    const currentlyIndexableSlug = await getIndexableCommunitySlug(
+      community.id,
+    );
+    const changedIndexableSlug =
+      currentlyIndexableSlug ?? previouslyIndexableSlug;
+    if (changedIndexableSlug) {
+      notifyIndexNow(
+        [
+          indexNowPageUrl(
+            `/r/${encodeURIComponent(changedIndexableSlug)}`,
+          ),
+        ],
+        config.INDEXNOW_KEY,
+        request.log,
+        config.NODE_ENV === "production",
+      );
+    }
     return {
       success: true,
       status:

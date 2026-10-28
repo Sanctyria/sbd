@@ -135,6 +135,18 @@ Do not edit applied migrations to change an existing deployment's schema; add a 
 
 Search indexing is disabled by default for all communities and profiles. Core staff can approve an eligible community only when it is public/active, has an 80-character description, and has at least 10 non-deleted posts from at least 3 active authors in the trailing 90 days. Posts are indexable only within such communities and while the post and author remain eligible. Profiles require explicit member opt-in, an active account, a 20-character bio, and at least one eligible public post. Apply the migration before using the Core approval controls.
 
+### IndexNow
+
+Set `INDEXNOW_KEY` in the production backend environment to the same key served by the frontend at `https://sanctyria.com/<key>.txt`. The verification file is public and must be deployed before sending notifications. Production content changes submit only eligible community, post, and profile URLs; removal or de-indexing changes notify search engines to recrawl affected URLs. IndexNow shares notifications with participating search engines and does not guarantee indexing.
+
+After both the frontend verification file and backend key are deployed, submit the current sitemap once from `Backend/`:
+
+```powershell
+npm run seo:indexnow:submit
+```
+
+The command verifies the live key file, reads the canonical sitemap, and submits its URLs in batches. It reads `INDEXNOW_KEY` from the backend process environment (or local `.env`); use the production key and a production database/runtime environment when running it. Search engines may initially return HTTP 202 while key verification is pending.
+
 ### Moving the production database to another Neon account
 
 To preserve the data currently in production, **clone/migrate the PostgreSQL database; do not run `npm run db:seed`**. The seed command is for local demo data and is intentionally disabled in production. A database dump preserves account/profile records, password hashes, communities, posts, moderation history, analytics, and the Drizzle migration ledger.

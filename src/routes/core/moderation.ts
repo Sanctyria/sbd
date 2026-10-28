@@ -17,7 +17,9 @@ import {
   recordPostEmberRemoval,
   recordReplyEmberRemoval,
 } from "../../lib/ember.js";
+import { indexNowPageUrl, notifyIndexNow } from "../../lib/indexNow.js";
 import { decodeCursor, encodeCursor } from "../../lib/cursor.js";
+import { getIndexableCommunitySlug } from "../../lib/searchIndexing.js";
 import {
   hasAllowedOrigin,
   invalidCursor,
@@ -253,13 +255,26 @@ export async function coreModerationRoutes(
           : decision.status,
         details: { reason: decision.reason, targetType: report.targetType },
       });
-      return { id: reportId, status: decision.status };
+      return { id: reportId, status: decision.status, communityId, postId };
     });
 
     if (!result) {
       return reply.code(404).send({
         error: { code: "NOT_FOUND", message: "The report could not be found." },
       });
+    }
+    if (decision.removeContent && result.communityId && result.postId) {
+      const indexableCommunitySlug = await getIndexableCommunitySlug(
+        result.communityId,
+      );
+      if (indexableCommunitySlug) {
+        notifyIndexNow(
+          [indexNowPageUrl(`/p/${encodeURIComponent(result.postId)}`)],
+          config.INDEXNOW_KEY,
+          request.log,
+          config.NODE_ENV === "production",
+        );
+      }
     }
     return result;
   });
