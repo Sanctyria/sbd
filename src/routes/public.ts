@@ -1800,6 +1800,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             and reply_owner.user_id = ${replies.authorId}
             and reply_owner.role = 'owner'
         )`,
+        isCommunityModerator: sql<boolean>`exists (
+          select 1 from ${communityMemberships} as reply_moderator
+          where reply_moderator.community_id = ${posts.communityId}
+            and reply_moderator.user_id = ${replies.authorId}
+            and reply_moderator.role = 'moderator'
+        )`,
         createdAt: replies.createdAt,
         author: {
           id: sql<string>`case when ${replies.deletedAt} is null then ${users.id} else '00000000-0000-4000-8000-000000000000'::uuid end`,
@@ -1981,6 +1987,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           where reply_owner.community_id = ${posts.communityId}
             and reply_owner.user_id = ${replies.authorId}
             and reply_owner.role = 'owner'
+        )`,
+        isCommunityModerator: sql<boolean>`exists (
+          select 1 from ${communityMemberships} as reply_moderator
+          where reply_moderator.community_id = ${posts.communityId}
+            and reply_moderator.user_id = ${replies.authorId}
+            and reply_moderator.role = 'moderator'
         )`,
         createdAt: replies.createdAt,
         author: {

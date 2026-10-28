@@ -86,6 +86,7 @@ export async function coreModerationRoutes(
           when ${reports.targetType} = 'reply' then (
             select ${replies.postId} from ${replies} where ${replies.id} = ${reports.targetId}
           )
+          when ${reports.targetType} = 'community' then null
           else null
         end`,
         targetBody: sql<string | null>`case
@@ -94,6 +95,9 @@ export async function coreModerationRoutes(
           )
           when ${reports.targetType} = 'reply' then (
             select ${replies.body} from ${replies} where ${replies.id} = ${reports.targetId}
+          )
+          when ${reports.targetType} = 'community' then (
+            select ${communities.description} from ${communities} where ${communities.id} = ${reports.targetId}
           )
           else null
         end`,
@@ -109,6 +113,9 @@ export async function coreModerationRoutes(
             inner join ${posts} on ${posts.id} = ${replies.postId}
             inner join ${communities} on ${communities.id} = ${posts.communityId}
             where ${replies.id} = ${reports.targetId}
+          )
+          when ${reports.targetType} = 'community' then (
+            select ${communities.slug} from ${communities} where ${communities.id} = ${reports.targetId}
           )
           else null
         end`,
@@ -152,9 +159,20 @@ export async function coreModerationRoutes(
         .where(eq(reports.id, reportId))
         .limit(1);
       if (!report) return null;
+      if (report.targetType === "community" && decision.removeContent) {
+        return { unsupportedRemoval: true as const };
+      }
 
       let communityId: string | null = null;
       let postId: string | null = null;
+      if (report.targetType === "community") {
+        const [community] = await transaction
+          .select({ id: communities.id })
+          .from(communities)
+          .where(eq(communities.id, report.targetId))
+          .limit(1);
+        communityId = community?.id ?? null;
+      }
       if (report.targetType === "post") {
         const [post] = await transaction
           .select({ communityId: posts.communityId })
@@ -261,6 +279,14 @@ export async function coreModerationRoutes(
     if (!result) {
       return reply.code(404).send({
         error: { code: "NOT_FOUND", message: "The report could not be found." },
+      });
+    }
+    if ("unsupportedRemoval" in result) {
+      return reply.code(400).send({
+        error: {
+          code: "COMMUNITY_REPORT_REMOVAL_UNSUPPORTED",
+          message: "Community reports can be resolved or dismissed, but not removed as content.",
+        },
       });
     }
     if (decision.removeContent && result.communityId && result.postId) {

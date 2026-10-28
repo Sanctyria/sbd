@@ -164,7 +164,7 @@ const moderationDecisionSchema = z
   })
   .refine((value) => !value.removeContent || value.status === "resolved");
 const reportBodySchema = z.object({
-  targetType: z.enum(["post", "reply"]),
+  targetType: z.enum(["post", "reply", "community"]),
   targetId: z.string().uuid(),
   reason: z.string().trim().min(10).max(500),
 });
@@ -1023,28 +1023,41 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               eq(communities.isPublic, true),
               eq(communities.status, "active"),
             )
-          : and(
+          : body.data.targetType === "reply"
+          ? and(
               eq(replies.id, body.data.targetId),
               isNull(replies.deletedAt),
               isNull(posts.deletedAt),
               eq(communities.isPublic, true),
               eq(communities.status, "active"),
+            )
+          : and(
+              eq(communities.id, body.data.targetId),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
             );
-      const targetQuery = database
-        .select({ id: body.data.targetType === "post" ? posts.id : replies.id })
-        .from(body.data.targetType === "post" ? posts : replies);
       const target =
         body.data.targetType === "post"
-          ? await targetQuery
+          ? await database
+              .select({ id: posts.id })
+              .from(posts)
               .innerJoin(communities, eq(communities.id, posts.communityId))
               .innerJoin(users, eq(users.id, posts.authorId))
               .where(and(targetConditions, isNull(users.deletedAt)))
               .limit(1)
-          : await targetQuery
+          : body.data.targetType === "reply"
+          ? await database
+              .select({ id: replies.id })
+              .from(replies)
               .innerJoin(posts, eq(posts.id, replies.postId))
               .innerJoin(communities, eq(communities.id, posts.communityId))
               .innerJoin(users, eq(users.id, replies.authorId))
               .where(and(targetConditions, isNull(users.deletedAt)))
+              .limit(1)
+          : await database
+              .select({ id: communities.id })
+              .from(communities)
+              .where(targetConditions)
               .limit(1);
       if (!target.length) {
         return reply.code(404).send({
@@ -1581,14 +1594,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             bannerUrl: communities.bannerUrl,
             websiteUrl: communities.websiteUrl,
           });
-        if (updated) {
-          await transaction.insert(outboxEvents).values({
-            topic: "community.updated",
-            communityId: updated.id,
-            entityId: updated.id,
-            payload: { slug: updated.slug, previousSlug: community.slug },
-          });
-        }
+        if (!updated) return { kind: "notFound" as const };
+        await transaction.insert(outboxEvents).values({
+          topic: "community.updated",
+          communityId: updated.id,
+          entityId: updated.id,
+          payload: { slug: updated.slug, previousSlug: community.slug },
+        });
         return { kind: "updated" as const, community: updated };
       });
 
@@ -2333,10 +2345,6 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         body.data,
       );
       if (idempotency === undefined) return;
-      const indexableCommunitySlug = await getIndexableCommunitySlug(
-        community.id,
-      );
-
       try {
         const result = await database.transaction(async (transaction) => {
           await transaction
@@ -2686,6 +2694,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
+      const indexableCommunitySlug = await getIndexableCommunitySlug(
+        community.id,
+      );
 
       const [membership] = await database
         .select({ userId: communityMemberships.userId })
