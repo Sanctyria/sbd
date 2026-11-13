@@ -127,6 +127,13 @@
       "when": 1793113155251,
       "tag": "0017_yummy_cable",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1793113155252,
+      "tag": "0018_auth_abuse_and_payment_events",
+      "breakpoints": true
     }
   ]
 }

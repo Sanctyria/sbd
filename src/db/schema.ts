@@ -599,3 +599,42 @@ export const dailyAnalytics = pgTable(
     index("daily_analytics_day_idx").on(table.day),
   ],
 );
+
+export const authRateLimits = pgTable(
+  "auth_rate_limits",
+  {
+    action: text("action").notNull(),
+    bucketHash: text("bucket_hash").notNull(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    windowStartedAt: timestamp("window_started_at", {
+      withTimezone: true,
+    }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      name: "auth_rate_limits_action_bucket_hash_pk",
+      columns: [table.action, table.bucketHash],
+    }),
+    index("auth_rate_limits_window_idx").on(table.windowStartedAt),
+  ],
+);
+
+export const paymentWebhookEvents = pgTable(
+  "payment_webhook_events",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    provider: text("provider").notNull(),
+    externalEventId: text("external_event_id").notNull(),
+    eventType: text("event_type").notNull(),
+    amountMinor: integer("amount_minor"),
+    currency: text("currency"),
+    receivedAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("payment_webhook_events_provider_event_uidx").on(
+      table.provider,
+      table.externalEventId,
+    ),
+    index("payment_webhook_events_received_idx").on(table.receivedAt),
+  ],
+);

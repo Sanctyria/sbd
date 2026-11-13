@@ -128,6 +128,61 @@ describe("community API", () => {
     expect(response.json().error.code).toBe("INVALID_REQUEST");
   });
 
+  it("returns only public donation configuration", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/donations/options",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json()).sort()).toEqual([
+      "cashAppTag",
+      "cryptoWallet",
+      "paypal",
+      "stripe",
+    ]);
+  });
+
+  it("serves only the public Turnstile site key to auth forms", async () => {
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/security-options",
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(Object.keys(response.json())).toEqual(["turnstileSiteKey"]);
+    expect(response.body).not.toContain("TURNSTILE_SECRET_KEY");
+  });
+
+  it("rejects invalid donation amounts before contacting payment providers", async () => {
+    const responses = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/api/v1/donations/stripe/checkout",
+        payload: { amount: 0 },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/donations/paypal/order",
+        payload: { amount: 5_001 },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/donations/paypal/capture",
+        payload: { orderId: "../../other-order" },
+      }),
+    ]);
+
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      400, 400, 400,
+    ]);
+    expect(responses.map((response) => response.json().error.code)).toEqual([
+      "INVALID_REQUEST",
+      "INVALID_REQUEST",
+      "INVALID_REQUEST",
+    ]);
+  });
+
   it("rejects authentication mutations from untrusted origins", async () => {
     const response = await app.inject({
       method: "DELETE",

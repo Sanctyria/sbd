@@ -1,0 +1,24 @@
+[Unit]
+Description=Sanctyria Fastify API
+After=network.target
+
+[Service]
+Type=simple
+User=sanctyria
+Group=sanctyria
+WorkingDirectory=/var/www/sanctyria/Backend
+EnvironmentFile=/etc/sanctyria/backend.env
+ExecStart=/usr/bin/node dist/server.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0027
+LimitNOFILE=65535
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

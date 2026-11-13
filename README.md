@@ -11,6 +11,8 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 - Audited search-index approvals for communities and explicit profile indexing opt-in.
 - Cursor-paginated APIs and server-sent community events.
 - HTTPS link metadata previews with guarded public-host fetching.
+- Cloudflare Turnstile verification and shared PostgreSQL auth-attempt limits.
+- One-time Stripe and PayPal checkout, with verified, idempotent payment webhooks.
 
 ## Requirements
 
@@ -77,15 +79,38 @@ Configuration is loaded from environment variables and validated at startup.
 | `HOST`                      | No       | `127.0.0.1`             | Address on which Fastify listens.                                                     |
 | `PORT`                      | No       | `3000`                  | Fastify listen port.                                                                  |
 | `WEB_ORIGIN`                | No       | `http://localhost:5173` | Allowed web origin for CORS and mutation origin checks.                               |
+| `TRUST_PROXY`               | No       | `127.0.0.1,::1`         | Comma-separated immediate proxy IPs/CIDRs trusted for forwarded client IPs.            |
 | `DATABASE_URL`              | Yes      | —                       | PostgreSQL connection URL.                                                            |
 | `SESSION_COOKIE_NAME`       | No       | `sanctyria_session`     | Name of the HTTP-only session cookie.                                                 |
 | `SESSION_COOKIE_SECURE`     | No       | Environment-dependent   | Set `true` behind HTTPS; use `false` only for local HTTP development.                 |
+| `TURNSTILE_SITE_KEY`        | Production | —                     | Public Cloudflare Turnstile site key, returned to the login/signup form.               |
+| `TURNSTILE_SECRET_KEY`      | Production | —                     | Cloudflare Turnstile server secret; required in production.                           |
+| `STRIPE_SECRET_KEY`         | No       | —                       | Stripe API secret; requires the webhook secret to enable donations.                   |
+| `STRIPE_WEBHOOK_SECRET`     | No       | —                       | Signing secret for the Stripe webhook endpoint.                                       |
+| `PAYPAL_CLIENT_ID`          | No       | —                       | PayPal REST application client ID.                                                     |
+| `PAYPAL_CLIENT_SECRET`      | No       | —                       | PayPal REST application secret.                                                       |
+| `PAYPAL_WEBHOOK_ID`         | No       | —                       | PayPal webhook ID used by PayPal's signature verification API.                        |
+| `PAYPAL_ENVIRONMENT`        | No       | `sandbox`               | `sandbox` or `live`; use sandbox while testing.                                        |
+| `CRYPTO_WALLET_ADDRESS`     | No       | —                       | Public donation wallet address; shown publicly when all crypto settings are set.       |
+| `CRYPTO_WALLET_ASSET`       | No       | —                       | Exact asset accepted at the configured address.                                       |
+| `CRYPTO_WALLET_NETWORK`     | No       | —                       | Exact chain/network accepted at the configured address.                               |
+| `CASH_APP_TAG`              | No       | —                       | Public Cash App Cashtag without `$`.                                                   |
 | `SENTRY_DSN`                | No       | Empty                   | Optional Sentry backend project DSN. Captures scrubbed server errors when configured. |
 | `CORE_ADMIN_USER_IDS`       | No       | Empty                   | Comma-separated UUIDs authorized for global Core administration.                      |
 | `CORE_SUPER_ADMIN_USER_IDS` | No       | Empty                   | Comma-separated subset of Core admins authorized for permanent account anonymization. |
 
 Keep all production credentials in a secret manager. Do not commit `.env`, database URLs, session secrets, or generated demo account files.
 When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with request data, user data, breadcrumbs, and exception messages removed. Review the Sentry project’s data-retention and access settings before enabling it in production.
+
+### VPS security and payments
+
+- Create a Cloudflare Turnstile widget for the production hostname. Set its **site key** as backend `TURNSTILE_SITE_KEY` and the matching **secret key** as backend `TURNSTILE_SECRET_KEY`. Production backend startup fails unless both are set. The site key is served to login/signup as public configuration; the secret remains server-only. Signup and login verify the single-use token with Cloudflare, action, and hostname before proceeding.
+- The backend applies per-IP route limits, PostgreSQL-backed daily signup limits per IP, and 15-minute login limits per IP and username. Signup limits are not keyed by requested username, so an attacker cannot reserve somebody else's desired username by exhausting a username bucket. Apply migration `0018_auth_abuse_and_payment_events.sql` before deploying this version. The stored rate-limit identifiers are SHA-256 hashes. Expired buckets are cleaned hourly.
+- Keep the API private behind the VPS reverse proxy/firewall. Set `TRUST_PROXY` only to the backend's immediate trusted proxy addresses. Configure that proxy to replace, not blindly pass through, client-supplied forwarded-IP headers; allow Cloudflare source ranges at the edge and preserve the verified client IP. Incorrect proxy trust can let clients spoof their rate-limit IP.
+- Configure Stripe `STRIPE_SECRET_KEY` and the endpoint signing secret `STRIPE_WEBHOOK_SECRET`; point Stripe at the public same-origin proxy `https://sanctyria.com/api/community/webhooks/stripe` and subscribe to `checkout.session.completed` and `checkout.session.async_payment_succeeded`. The proxy forwards the raw request body and signature header to the private API endpoint, which verifies the timestamped HMAC and deduplicates successful events.
+- Configure a PayPal REST app and webhook, then set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and `PAYPAL_ENVIRONMENT=live`. Point PayPal at `https://sanctyria.com/api/community/webhooks/paypal`; signatures are checked through PayPal's verification API. Test with sandbox credentials first.
+- Checkout amounts are one-time USD payments from $1 through $5,000. Cash App and self-hosted crypto wallet transfers are direct payments, not webhook-backed confirmations; configure `CASH_APP_TAG` or all three `CRYPTO_WALLET_*` values only after confirming the destination, asset, and network. Never accept funds on an address whose network/asset has not been verified.
+- `/donate` presents the refund policy and only enables methods configured on the backend. Donations are generally non-refundable, subject to applicable law and payment-provider rules; accidental/unauthorized payment queries should be handled through the support channel.
 
 ## Commands
 

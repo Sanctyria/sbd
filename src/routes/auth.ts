@@ -1,5 +1,6 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import argon2 from "argon2";
+import { normalizeIP } from "@fastify/rate-limit";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
@@ -13,6 +14,7 @@ import {
   userSessions,
   users,
 } from "../db/schema.js";
+import { consumeAuthRateLimit, verifyTurnstile } from "../lib/authSecurity.js";
 
 const sessionDurationMs = 30 * 24 * 60 * 60 * 1000;
 const dummyPasswordHash = argon2.hash(randomBytes(32).toString("base64url"), {
@@ -21,6 +23,7 @@ const dummyPasswordHash = argon2.hash(randomBytes(32).toString("base64url"), {
 const loginSchema = z.object({
   username: z.string().trim().min(3).max(30),
   password: z.string().min(1).max(256),
+  turnstileToken: z.string().min(1).max(2048).optional(),
 });
 const signupSchema = z.object({
   username: z
@@ -30,6 +33,7 @@ const signupSchema = z.object({
     .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/),
   displayName: z.string().trim().min(1).max(60),
   password: z.string().min(12).max(256),
+  turnstileToken: z.string().min(1).max(2048).optional(),
 });
 
 function hashSessionToken(token: string): string {
@@ -68,10 +72,20 @@ export async function authRoutes(
   app: FastifyInstance,
   config: Environment = environment,
 ): Promise<void> {
+  app.get("/api/v1/auth/security-options", async () => ({
+    turnstileSiteKey: config.TURNSTILE_SITE_KEY ?? null,
+  }));
+
   app.post(
     "/api/v1/auth/signup",
     {
-      config: { rateLimit: { max: 3, timeWindow: "15 minutes" } },
+      config: {
+        rateLimit: {
+          max: 10,
+          timeWindow: "1 hour",
+          keyGenerator: (request) => normalizeIP(request.ip),
+        },
+      },
     },
     async (request, reply) => {
       reply.header("cache-control", "no-store");
@@ -84,6 +98,44 @@ export async function authRoutes(
             code: "INVALID_REQUEST",
             message:
               "Choose a 3-30 character username, display name, and password with at least 12 characters.",
+          },
+        });
+      }
+
+      const username = parsedBody.data.username;
+      if (
+        !(await consumeAuthRateLimit(
+          "signup",
+          [`ip:${normalizeIP(request.ip)}`],
+          [10],
+          24 * 60 * 60 * 1_000,
+        ))
+      ) {
+        return reply.code(429).send({
+          error: {
+            code: "RATE_LIMITED",
+            message: "Too many account creation attempts. Try again later.",
+          },
+        });
+      }
+
+      const turnstileResult = await verifyTurnstile(
+        parsedBody.data.turnstileToken,
+        request,
+        config.TURNSTILE_SECRET_KEY,
+        "signup",
+        new URL(config.WEB_ORIGIN).hostname,
+      );
+      if (turnstileResult !== "valid") {
+        const unavailable = turnstileResult === "unavailable";
+        return reply.code(unavailable ? 503 : 403).send({
+          error: {
+            code: unavailable
+              ? "SECURITY_CHECK_UNAVAILABLE"
+              : "SECURITY_CHECK_FAILED",
+            message: unavailable
+              ? "Security verification is temporarily unavailable."
+              : "Complete the security check and try again.",
           },
         });
       }
@@ -108,7 +160,7 @@ export async function authRoutes(
             .returning({ id: users.id });
           await transaction.insert(profiles).values({
             userId,
-            username: parsedBody.data.username,
+            username,
             displayName: parsedBody.data.displayName,
             initials,
             avatarColor: "#cf6f65",
@@ -132,7 +184,7 @@ export async function authRoutes(
         return reply.code(201).send({
           user: {
             id: createdUser?.id ?? userId,
-            username: parsedBody.data.username,
+            username,
             displayName: parsedBody.data.displayName,
             initials,
             avatarColor: "#cf6f65",
@@ -160,7 +212,13 @@ export async function authRoutes(
   app.post(
     "/api/v1/auth/login",
     {
-      config: { rateLimit: { max: 5, timeWindow: "15 minutes" } },
+      config: {
+        rateLimit: {
+          max: 30,
+          timeWindow: "15 minutes",
+          keyGenerator: (request) => normalizeIP(request.ip),
+        },
+      },
     },
     async (request, reply) => {
       reply.header("cache-control", "no-store");
@@ -171,6 +229,44 @@ export async function authRoutes(
           error: {
             code: "INVALID_REQUEST",
             message: "Enter a username and password.",
+          },
+        });
+      }
+
+      const username = parsedBody.data.username.toLowerCase();
+      if (
+        !(await consumeAuthRateLimit(
+          "login",
+          [`ip:${normalizeIP(request.ip)}`, `username:${username}`],
+          [30, 10],
+          15 * 60 * 1_000,
+        ))
+      ) {
+        return reply.code(429).send({
+          error: {
+            code: "RATE_LIMITED",
+            message: "Too many sign-in attempts. Try again later.",
+          },
+        });
+      }
+
+      const turnstileResult = await verifyTurnstile(
+        parsedBody.data.turnstileToken,
+        request,
+        config.TURNSTILE_SECRET_KEY,
+        "login",
+        new URL(config.WEB_ORIGIN).hostname,
+      );
+      if (turnstileResult !== "valid") {
+        const unavailable = turnstileResult === "unavailable";
+        return reply.code(unavailable ? 503 : 403).send({
+          error: {
+            code: unavailable
+              ? "SECURITY_CHECK_UNAVAILABLE"
+              : "SECURITY_CHECK_FAILED",
+            message: unavailable
+              ? "Security verification is temporarily unavailable."
+              : "Complete the security check and try again.",
           },
         });
       }
@@ -189,7 +285,7 @@ export async function authRoutes(
         .innerJoin(userCredentials, eq(userCredentials.userId, users.id))
         .where(
           and(
-            eq(profiles.username, parsedBody.data.username.toLowerCase()),
+            eq(profiles.username, username),
             isNull(users.deletedAt),
             isNull(users.suspendedAt),
           ),

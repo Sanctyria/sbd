@@ -1,13 +1,14 @@
-import { createHash } from "node:crypto";
 import * as Sentry from "@sentry/node";
 import cors from "@fastify/cors";
 import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
-import rateLimit from "@fastify/rate-limit";
+import rateLimit, { normalizeIP } from "@fastify/rate-limit";
 import Fastify, { type FastifyInstance } from "fastify";
 import { environment, type Environment } from "./config/env.js";
 import { pool } from "./db/client.js";
+import { pruneAuthRateLimits } from "./lib/authSecurity.js";
 import { authRoutes } from "./routes/auth.js";
+import { donationRoutes } from "./routes/donations.js";
 import { mutationRoutes } from "./routes/mutations.js";
 import { publicRoutes } from "./routes/public.js";
 import { coreRoutes } from "./routes/core.js";
@@ -48,7 +49,25 @@ export async function buildApp(
   const app = Fastify({
     logger: config.NODE_ENV !== "test",
     bodyLimit: 1_048_576,
+    trustProxy: config.TRUST_PROXY,
   });
+  app.decorateRequest("rawBody", null);
+  app.removeContentTypeParser("application/json");
+  app.addContentTypeParser(
+    "application/json",
+    { parseAs: "buffer" },
+    (request, body, done) => {
+      const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+      request.rawBody = rawBody;
+      try {
+        done(null, JSON.parse(rawBody.toString("utf8")));
+      } catch (error) {
+        done(
+          error instanceof Error ? error : new Error("Invalid JSON request."),
+        );
+      }
+    },
+  );
   app.setErrorHandler((error, request, reply) => {
     request.log.error({ err: error }, "Request failed");
     const errorStatusCode =
@@ -90,12 +109,7 @@ export async function buildApp(
   await app.register(rateLimit, {
     max: 120,
     timeWindow: "1 minute",
-    keyGenerator: (request) => {
-      const sessionToken = request.cookies[config.SESSION_COOKIE_NAME];
-      return sessionToken
-        ? createHash("sha256").update(sessionToken).digest("hex")
-        : request.ip;
-    },
+    keyGenerator: (request) => normalizeIP(request.ip),
   });
   let cleanupTask: Promise<void> | undefined;
   const cleanupExpiredSessions = async () => {
@@ -117,8 +131,12 @@ export async function buildApp(
       if ((result.rowCount ?? 0) < SESSION_CLEANUP_BATCH_SIZE) break;
     }
     if (totalDeleted > 0) {
-      app.log.info({ deletedSessions: totalDeleted }, "Expired sessions removed");
+      app.log.info(
+        { deletedSessions: totalDeleted },
+        "Expired sessions removed",
+      );
     }
+    await pruneAuthRateLimits();
   };
   const runSessionCleanup = () => {
     if (config.NODE_ENV === "test" || cleanupTask) return;
@@ -158,6 +176,7 @@ export async function buildApp(
     }
   });
   await app.register(async (instance) => authRoutes(instance, config));
+  await app.register(async (instance) => donationRoutes(instance, config));
   await app.register(mutationRoutes);
   await app.register(publicRoutes);
   await app.register(async (instance) => coreRoutes(instance, config));
