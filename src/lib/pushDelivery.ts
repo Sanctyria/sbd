@@ -39,7 +39,59 @@ function errorCode(error: unknown): string {
   ) {
     return error.code.slice(0, 100);
   }
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "cause" in error &&
+    typeof error.cause === "object" &&
+    error.cause !== null &&
+    "code" in error.cause &&
+    typeof error.cause.code === "string"
+  ) {
+    return error.cause.code.slice(0, 100);
+  }
   return "unknown";
+}
+
+function safeErrorText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const sanitized = value.replace(/[\r\n\t]+/g, " ").trim();
+  return sanitized ? sanitized.slice(0, 500) : undefined;
+}
+
+function errorDetails(error: unknown): Record<string, string> {
+  if (typeof error !== "object" || error === null) {
+    return { code: errorCode(error) };
+  }
+
+  const details: Record<string, string> = { code: errorCode(error) };
+  if ("name" in error) {
+    const name = safeErrorText(error.name);
+    if (name) details.errorName = name;
+  }
+  if ("message" in error) {
+    const message = safeErrorText(error.message);
+    if (message) details.errorMessage = message;
+  }
+  if ("cause" in error && typeof error.cause === "object" && error.cause) {
+    if ("code" in error.cause && typeof error.cause.code === "string") {
+      details.causeCode = error.cause.code.slice(0, 100);
+    }
+    if ("message" in error.cause) {
+      const causeMessage = safeErrorText(error.cause.message);
+      if (causeMessage) details.causeMessage = causeMessage;
+    }
+  }
+  return details;
+}
+
+export function isExpiredPushRegistration(error: unknown): boolean {
+  const code = errorCode(error);
+  return (
+    code === "messaging/registration-token-not-registered" ||
+    code === "messaging/invalid-registration-token" ||
+    code === "messaging/installation-id-not-registered"
+  );
 }
 
 function optionalPayloadString(
@@ -213,10 +265,7 @@ async function processDelivery(
     );
   } catch (error) {
     const code = errorCode(error);
-    if (
-      code === "messaging/registration-token-not-registered" ||
-      code === "messaging/invalid-registration-token"
-    ) {
+    if (isExpiredPushRegistration(error)) {
       await pool.query("delete from push_devices where id = $1", [
         delivery.device_id,
       ]);
@@ -244,7 +293,7 @@ async function processDelivery(
         eventId: delivery.event_id,
         deviceId: delivery.device_id,
         attempt: delivery.attempts,
-        code,
+        ...errorDetails(error),
       },
       "Push notification delivery failed",
     );
@@ -296,10 +345,7 @@ export function startPushDeliveryWorker(
         ),
       );
     } catch (error) {
-      logger.error(
-        { code: errorCode(error) },
-        "Push notification worker failed",
-      );
+      logger.error(errorDetails(error), "Push notification worker failed");
     } finally {
       running = false;
     }

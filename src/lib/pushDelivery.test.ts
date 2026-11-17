@@ -1,7 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { makeMessage } from "./pushDelivery.js";
+import {
+  isExpiredPushRegistration,
+  makeMessage,
+} from "./pushDelivery.js";
 
 describe("push delivery message", () => {
+  it("recognizes unregistered Firebase installation IDs", () => {
+    expect(
+      isExpiredPushRegistration({
+        code: "messaging/installation-id-not-registered",
+      }),
+    ).toBe(true);
+    expect(
+      isExpiredPushRegistration({
+        code: "messaging/invalid-argument",
+      }),
+    ).toBe(false);
+  });
+
   it("targets a Firebase Installation ID", () => {
     const message = makeMessage({
       event_id: "event-id",
