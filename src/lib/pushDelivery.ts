@@ -25,6 +25,13 @@ type ClaimedDelivery = {
   entity_id: string | null;
   payload: Record<string, unknown>;
   attempts: number;
+  actor_avatar_url?: string | null;
+  media_url?: string | null;
+  media_kind?: string | null;
+  post_preview?: string | null;
+  community_name?: string | null;
+  community_slug?: string | null;
+  post_url?: string | null;
 };
 
 const MAX_ATTEMPTS = 8;
@@ -102,57 +109,137 @@ function optionalPayloadString(
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function youtubeThumbnailUrl(value: string | null | undefined): string | undefined {
+  if (!value) return undefined;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    if (error instanceof TypeError) return undefined;
+    throw error;
+  }
+  const host = url.hostname.toLowerCase();
+  const videoId =
+    host === "youtu.be"
+      ? url.pathname.split("/").filter(Boolean)[0]
+      : host === "youtube.com" || host === "www.youtube.com"
+        ? url.searchParams.get("v") ??
+          (url.pathname.match(/^\/(?:shorts|embed|live)\/([^/]+)/)?.[1] ??
+            undefined)
+        : undefined;
+  return videoId && /^[a-zA-Z0-9_-]{6,20}$/.test(videoId)
+    ? `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+    : undefined;
+}
+
 export function makeMessage(delivery: ClaimedDelivery) {
-  const title =
-    optionalPayloadString(delivery.payload, "title") ??
-    optionalPayloadString(delivery.payload, "actorName") ??
-    "Sanctyria";
-  const body =
-    optionalPayloadString(delivery.payload, "detail") ??
-    optionalPayloadString(delivery.payload, "preview") ??
-    "You have a new notification.";
-  const communitySlug = optionalPayloadString(
-    delivery.payload,
-    "communitySlug",
-  );
+  const action = optionalPayloadString(delivery.payload, "action");
+  const actorName =
+    optionalPayloadString(delivery.payload, "actorName") ?? "A community member";
   const actorUsername = optionalPayloadString(
     delivery.payload,
     "actorUsername",
   );
+  const preview = optionalPayloadString(delivery.payload, "preview");
+  const postPreview =
+    delivery.post_preview ??
+    optionalPayloadString(delivery.payload, "postPreview");
+  const communitySlug =
+    delivery.community_slug ??
+    optionalPayloadString(
+      delivery.payload,
+      "communitySlug",
+    );
+  const communityName =
+    delivery.community_name ??
+    optionalPayloadString(delivery.payload, "communityName");
+  const title =
+    optionalPayloadString(delivery.payload, "title") ??
+    (delivery.notification_type === "system" && action === "follow"
+      ? `${actorName} started following you`
+      : delivery.notification_type === "reply"
+        ? `${actorName} replied to you`
+        : delivery.notification_type === "mention"
+          ? `${actorName} mentioned you`
+          : delivery.notification_type === "reaction"
+            ? `${actorName} liked your post`
+            : delivery.notification_type === "community"
+              ? `${actorName} updated ${communityName ?? "your community"}`
+              : "Sanctyria update");
+  const body =
+    optionalPayloadString(delivery.payload, "detail") ??
+    (delivery.notification_type === "system" && action === "follow"
+      ? `@${actorUsername ?? "member"} followed you.`
+      : delivery.notification_type === "reaction"
+        ? postPreview ?? "Tap to see the post they liked."
+        : delivery.notification_type === "reply" ||
+            delivery.notification_type === "mention"
+          ? [
+              preview ?? "Tap to view the conversation.",
+              ...(postPreview ? [`On your post: ${postPreview}`] : []),
+            ].join(" · ")
+          : preview ?? "Open to view this community update.");
+  const actorAvatarUrl =
+    delivery.actor_avatar_url ??
+    optionalPayloadString(delivery.payload, "actorAvatarUrl");
+  const mediaUrl =
+    delivery.media_url ?? optionalPayloadString(delivery.payload, "mediaUrl");
+  const mediaKind =
+    delivery.media_kind ?? optionalPayloadString(delivery.payload, "mediaKind");
+  const postUrl =
+    delivery.post_url ?? optionalPayloadString(delivery.payload, "postUrl");
+  const imageUrl = mediaUrl ?? youtubeThumbnailUrl(postUrl) ?? actorAvatarUrl;
   const deepLink =
-    communitySlug
+    delivery.notification_type === "community" && communitySlug
       ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
-      : delivery.notification_type === "community" ||
-          delivery.notification_type === "system"
-        ? actorUsername
-          ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
-          : ""
+      : delivery.notification_type === "system" && actorUsername
+        ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
         : delivery.entity_id
           ? `https://sanctyria.com/p/${encodeURIComponent(delivery.entity_id)}`
-          : actorUsername
-            ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
+          : communitySlug
+            ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
             : "";
+  const data = {
+    notificationId: delivery.notification_id,
+    notificationType: delivery.notification_type,
+    entityId: delivery.entity_id ?? "",
+    action: action ?? "",
+    actorName,
+    actorUsername: actorUsername ?? "",
+    actorAvatarUrl: actorAvatarUrl ?? "",
+    mediaUrl: mediaUrl ?? "",
+    mediaKind: mediaKind ?? "",
+    postUrl: postUrl ?? "",
+    postPreview: postPreview ?? "",
+    preview: preview ?? "",
+    communityName: communityName ?? "",
+    communitySlug: communitySlug ?? "",
+    title: title.slice(0, 100),
+    body: body.slice(0, 240),
+    deepLink,
+  };
+  const supportsPostActions =
+    delivery.entity_id !== null &&
+    ["reply", "mention", "reaction"].includes(delivery.notification_type);
 
   return {
     fid: delivery.fid,
-    notification: { title: title.slice(0, 100), body: body.slice(0, 240) },
-    data: {
-      notificationId: delivery.notification_id,
-      notificationType: delivery.notification_type,
-      entityId: delivery.entity_id ?? "",
-      communitySlug: communitySlug ?? "",
-      actorUsername: actorUsername ?? "",
-      deepLink,
-    },
+    data,
     android: {
       priority: "high" as const,
-      notification: {
-        channelId: "community_notifications",
-        clickAction: "FLUTTER_NOTIFICATION_CLICK",
-      },
+      ttl: 60 * 60 * 1000,
     },
     apns: {
-      payload: { aps: { sound: "default" } },
+      headers: { "apns-priority": "10" },
+      payload: {
+        aps: {
+          alert: { title: data.title, body: data.body },
+          sound: "default",
+          mutableContent: Boolean(imageUrl),
+          ...(supportsPostActions ? { category: "community_actions" } : {}),
+        },
+      },
+      ...(imageUrl ? { fcmOptions: { imageUrl } } : {}),
     },
   };
 }
@@ -213,7 +300,65 @@ async function claimDeliveries(): Promise<ClaimedDelivery[]> {
          n.type as notification_type,
          n.entity_id,
          n.payload,
-         pd.attempts
+         pd.attempts,
+         (
+           select actor_profile.avatar_url
+           from profiles actor_profile
+           where actor_profile.username = n.payload->>'actorUsername'
+           limit 1
+         ) as actor_avatar_url,
+         (
+           select case
+             when notification_post.kind in ('image_url', 'video_url')
+               then notification_post.url
+             else null
+           end
+           from posts notification_post
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as media_url,
+         (
+           select notification_post.kind
+           from posts notification_post
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as media_kind,
+         (
+           select left(notification_post.body, 180)
+           from posts notification_post
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as post_preview,
+         (
+           select notification_community.name
+           from posts notification_post
+           inner join communities notification_community
+             on notification_community.id = notification_post.community_id
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as community_name,
+         (
+           select notification_community.slug
+           from posts notification_post
+           inner join communities notification_community
+             on notification_community.id = notification_post.community_id
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as community_slug
+         ,
+         (
+           select notification_post.url
+           from posts notification_post
+           where notification_post.id = n.entity_id
+             and notification_post.kind = 'link'
+             and notification_post.deleted_at is null
+           limit 1
+         ) as post_url
        from push_deliveries pd
        inner join outbox_events e on e.id = pd.event_id
        inner join notifications n on n.id = e.entity_id

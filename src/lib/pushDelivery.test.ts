@@ -32,12 +32,73 @@ describe("push delivery message", () => {
 
     expect(message).toMatchObject({
       fid: "firebase-installation-id",
-      notification: { title: "A reply", body: "New activity" },
       data: {
+        title: "A reply",
+        body: "New activity",
         notificationId: "notification-id",
         deepLink: "https://sanctyria.com/p/post-id",
       },
+      apns: {
+        payload: {
+          aps: {
+            alert: { title: "A reply", body: "New activity" },
+            category: "community_actions",
+          },
+        },
+      },
     });
     expect(message).not.toHaveProperty("token");
+    expect(message).not.toHaveProperty("notification");
+    expect(message.android.priority).toBe("high");
+  });
+
+  it("formats follows as new-follower notifications with profile actions", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "system",
+      entity_id: "follower-id",
+      payload: {
+        action: "follow",
+        actorName: "Mira Voss",
+        actorUsername: "mira",
+      },
+      attempts: 0,
+    });
+
+    expect(message.data).toMatchObject({
+      title: "Mira Voss started following you",
+      body: "@mira followed you.",
+      deepLink: "https://sanctyria.com/u/mira",
+    });
+    expect(message.apns.payload.aps.category).toBeUndefined();
+  });
+
+  it("includes media and avatar metadata for rich Android notifications", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "mention",
+      entity_id: "post-id",
+      payload: { actorName: "Mira Voss", actorUsername: "mira" },
+      attempts: 0,
+      actor_avatar_url: "https://cdn.example.test/avatar.png",
+      media_url: "https://cdn.example.test/post.png",
+      media_kind: "image_url",
+      post_preview: "An illustrated community post.",
+    });
+
+    expect(message.data).toMatchObject({
+      actorAvatarUrl: "https://cdn.example.test/avatar.png",
+      mediaUrl: "https://cdn.example.test/post.png",
+      postPreview: "An illustrated community post.",
+    });
+    expect(message.apns.fcmOptions).toEqual({
+      imageUrl: "https://cdn.example.test/post.png",
+    });
   });
 });

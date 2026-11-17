@@ -1226,6 +1226,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               entityId: community.id,
               payload: {
                 action: "role_changed",
+                actorUsername: actor?.username ?? "member",
+                actorName: actor?.displayName ?? "the community owner",
                 title: `Your role in ${community.name} changed to ${result.role}`,
                 detail: `Updated by ${actor?.displayName ?? "the community owner"}.`,
                 communitySlug: community.slug,
@@ -1384,6 +1386,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         unmute: "member_unmuted",
         remove: "member_removed",
       }[body.data.action];
+      const [actor] = await database
+        .select({
+          username: profiles.username,
+          displayName: profiles.displayName,
+        })
+        .from(profiles)
+        .where(eq(profiles.userId, userId))
+        .limit(1);
       await database.transaction(async (transaction) => {
         if (body.data.action === "remove") {
           await transaction
@@ -1440,6 +1450,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             entityId: community.id,
             payload: {
               action: actionName,
+              actorUsername: actor?.username ?? "member",
+              actorName: actor?.displayName ?? "A community moderator",
               title:
                 body.data.action === "warn"
                   ? `A moderator sent you a warning in ${community.name}`
@@ -1780,6 +1792,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               entityId: community.id,
               payload: {
                 action: "owner_transferred",
+                actorUsername: actor?.username ?? "member",
+                actorName: actor?.displayName ?? "the community owner",
                 title:
                   recipientId === target.id
                     ? `You are now the owner of ${community.name}`
@@ -2143,6 +2157,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               action: "follow",
               actorUsername: followerProfile?.username ?? "member",
               actorName: followerProfile?.displayName ?? "A community member",
+              title: `${followerProfile?.displayName ?? "A community member"} started following you`,
+              detail: `@${followerProfile?.username ?? "member"} followed you.`,
             },
           })
           .returning({ id: notifications.id });

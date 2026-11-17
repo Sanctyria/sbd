@@ -80,11 +80,18 @@ const linkPreviewQuerySchema = z.object({
 
 const feedQuerySchema = pageQuerySchema
   .extend({
-    scope: z.enum(["following", "community", "public"]).default("public"),
+    scope: z
+      .enum(["following", "community", "profile", "public"])
+      .default("public"),
     community: z
       .string()
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
       .optional(),
+    username: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/)
+      .optional(),
+    media: z.enum(["video"]).optional(),
   })
   .superRefine((query, context) => {
     if (query.scope === "community" && !query.community) {
@@ -92,6 +99,13 @@ const feedQuerySchema = pageQuerySchema
         code: "custom",
         path: ["community"],
         message: "A community slug is required for the community feed.",
+      });
+    }
+    if (query.scope === "profile" && !query.username) {
+      context.addIssue({
+        code: "custom",
+        path: ["username"],
+        message: "A username is required for the profile feed.",
       });
     }
   });
@@ -1408,7 +1422,68 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         id: notifications.id,
         type: notifications.type,
         entityId: notifications.entityId,
-        payload: notifications.payload,
+        payload: sql<Record<string, unknown>>`
+          ${notifications.payload} || jsonb_strip_nulls(jsonb_build_object(
+            'actorAvatarUrl', (
+              select notification_actor.avatar_url
+              from profiles notification_actor
+              where notification_actor.username =
+                ${notifications.payload}->>'actorUsername'
+              limit 1
+            ),
+            'postPreview', (
+              select left(notification_post.body, 180)
+              from posts notification_post
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'mediaUrl', (
+              select case
+                when notification_post.kind in ('image_url', 'video_url')
+                  then notification_post.url
+                else null
+              end
+              from posts notification_post
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'mediaKind', (
+              select notification_post.kind
+              from posts notification_post
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'postUrl', (
+              select notification_post.url
+              from posts notification_post
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.kind = 'link'
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'communityName', (
+              select notification_community.name
+              from posts notification_post
+              inner join communities notification_community
+                on notification_community.id = notification_post.community_id
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'communitySlug', (
+              select notification_community.slug
+              from posts notification_post
+              inner join communities notification_community
+                on notification_community.id = notification_post.community_id
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            )
+          ))
+        `,
         createdAt: notifications.createdAt,
         readAt: notifications.readAt,
       })
@@ -1586,6 +1661,27 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
               .select({ communityId: communitySlugAliases.communityId })
               .from(communitySlugAliases)
               .where(eq(communitySlugAliases.slug, parsedQuery.data.community)),
+          ),
+        )!,
+      );
+    }
+    if (parsedQuery.data.scope === "profile" && parsedQuery.data.username) {
+      conditions.push(eq(profiles.username, parsedQuery.data.username));
+    }
+    if (parsedQuery.data.media === "video") {
+      conditions.push(
+        or(
+          eq(posts.kind, "video_url"),
+          and(
+            eq(posts.kind, "link"),
+            or(
+              ilike(posts.url, "%youtube.com/watch%"),
+              ilike(posts.url, "%youtube.com/shorts/%"),
+              ilike(posts.url, "%youtube.com/live/%"),
+              ilike(posts.url, "%youtu.be/%"),
+              ilike(posts.url, "%youtube-nocookie.com/embed/%"),
+              ilike(posts.url, "%youtube-nocookie.com/shorts/%"),
+            )!,
           ),
         )!,
       );
