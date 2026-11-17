@@ -1438,6 +1438,30 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
                 and notification_post.deleted_at is null
               limit 1
             ),
+            'postAuthorName', (
+              select notification_post_author.display_name
+              from posts notification_post
+              inner join profiles notification_post_author
+                on notification_post_author.user_id = notification_post.author_id
+              inner join users notification_post_user
+                on notification_post_user.id = notification_post.author_id
+                and notification_post_user.deleted_at is null
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
+            'postAuthorUsername', (
+              select notification_post_author.username
+              from posts notification_post
+              inner join profiles notification_post_author
+                on notification_post_author.user_id = notification_post.author_id
+              inner join users notification_post_user
+                on notification_post_user.id = notification_post.author_id
+                and notification_post_user.deleted_at is null
+              where notification_post.id = ${notifications.entityId}
+                and notification_post.deleted_at is null
+              limit 1
+            ),
             'mediaUrl', (
               select case
                 when notification_post.kind in ('image_url', 'video_url')

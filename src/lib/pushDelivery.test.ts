@@ -52,6 +52,33 @@ describe("push delivery message", () => {
     expect(message.android.priority).toBe("high");
   });
 
+  it("identifies replies to a user's reply without claiming the post", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "reply",
+      entity_id: "post-id",
+      payload: {
+        actorName: "Mira Voss",
+        targetKind: "reply",
+        preview: "A nested reply",
+      },
+      attempts: 0,
+      post_preview: "Original post context",
+      post_author_name: "Tess Ember",
+      post_author_username: "tess",
+    });
+
+    expect(message.data).toMatchObject({
+      title: "Mira Voss replied to your reply",
+      body: "A nested reply · In Tess Ember's post: Original post context",
+      targetKind: "reply",
+      postAuthorName: "Tess Ember",
+    });
+  });
+
   it("formats follows as new-follower notifications with profile actions", () => {
     const message = makeMessage({
       event_id: "event-id",

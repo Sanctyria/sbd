@@ -29,6 +29,8 @@ type ClaimedDelivery = {
   media_url?: string | null;
   media_kind?: string | null;
   post_preview?: string | null;
+  post_author_name?: string | null;
+  post_author_username?: string | null;
   community_name?: string | null;
   community_slug?: string | null;
   post_url?: string | null;
@@ -144,6 +146,21 @@ export function makeMessage(delivery: ClaimedDelivery) {
   const postPreview =
     delivery.post_preview ??
     optionalPayloadString(delivery.payload, "postPreview");
+  const postAuthorName =
+    delivery.post_author_name ??
+    optionalPayloadString(delivery.payload, "postAuthorName");
+  const postAuthorUsername =
+    delivery.post_author_username ??
+    optionalPayloadString(delivery.payload, "postAuthorUsername");
+  const targetKind = optionalPayloadString(delivery.payload, "targetKind");
+  const postContext =
+    targetKind === "reply"
+      ? postAuthorName
+        ? `In ${postAuthorName}'s post`
+        : postAuthorUsername
+          ? `In @${postAuthorUsername}'s post`
+          : "In this post"
+      : "On your post";
   const communitySlug =
     delivery.community_slug ??
     optionalPayloadString(
@@ -158,7 +175,9 @@ export function makeMessage(delivery: ClaimedDelivery) {
     (delivery.notification_type === "system" && action === "follow"
       ? `${actorName} started following you`
       : delivery.notification_type === "reply"
-        ? `${actorName} replied to you`
+        ? targetKind === "reply"
+          ? `${actorName} replied to your reply`
+          : `${actorName} replied to your post`
         : delivery.notification_type === "mention"
           ? `${actorName} mentioned you`
           : delivery.notification_type === "reaction"
@@ -176,7 +195,7 @@ export function makeMessage(delivery: ClaimedDelivery) {
             delivery.notification_type === "mention"
           ? [
               preview ?? "Tap to view the conversation.",
-              ...(postPreview ? [`On your post: ${postPreview}`] : []),
+              ...(postPreview ? [`${postContext}: ${postPreview}`] : []),
             ].join(" · ")
           : preview ?? "Open to view this community update.");
   const actorAvatarUrl =
@@ -211,6 +230,9 @@ export function makeMessage(delivery: ClaimedDelivery) {
     mediaKind: mediaKind ?? "",
     postUrl: postUrl ?? "",
     postPreview: postPreview ?? "",
+    postAuthorName: postAuthorName ?? "",
+    postAuthorUsername: postAuthorUsername ?? "",
+    targetKind: targetKind ?? "",
     preview: preview ?? "",
     communityName: communityName ?? "",
     communitySlug: communitySlug ?? "",
@@ -332,6 +354,30 @@ async function claimDeliveries(): Promise<ClaimedDelivery[]> {
              and notification_post.deleted_at is null
            limit 1
          ) as post_preview,
+         (
+           select notification_post_author.display_name
+           from posts notification_post
+           inner join profiles notification_post_author
+             on notification_post_author.user_id = notification_post.author_id
+           inner join users notification_post_user
+             on notification_post_user.id = notification_post.author_id
+             and notification_post_user.deleted_at is null
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as post_author_name,
+         (
+           select notification_post_author.username
+           from posts notification_post
+           inner join profiles notification_post_author
+             on notification_post_author.user_id = notification_post.author_id
+           inner join users notification_post_user
+             on notification_post_user.id = notification_post.author_id
+             and notification_post_user.deleted_at is null
+           where notification_post.id = n.entity_id
+             and notification_post.deleted_at is null
+           limit 1
+         ) as post_author_username,
          (
            select notification_community.name
            from posts notification_post
