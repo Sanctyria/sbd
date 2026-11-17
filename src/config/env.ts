@@ -21,6 +21,14 @@ const environmentSchema = z
       .pipe(z.array(z.string().min(1))),
     SESSION_COOKIE_NAME: z.string().min(1).default("sanctyria_session"),
     SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
+    FIREBASE_SERVICE_ACCOUNT_JSON: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().min(1).optional(),
+    ),
+    GOOGLE_APPLICATION_CREDENTIALS: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().min(1).optional(),
+    ),
     TURNSTILE_SITE_KEY: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),

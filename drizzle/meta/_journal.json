@@ -134,6 +134,20 @@
       "when": 1793113155252,
       "tag": "0018_auth_abuse_and_payment_events",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1794871184068,
+      "tag": "0019_silly_stryfe",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1794872107590,
+      "tag": "0020_fair_lady_mastermind",
+      "breakpoints": true
     }
   ]
 }

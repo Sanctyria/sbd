@@ -194,6 +194,31 @@ describe("community API", () => {
     expect(response.json().error.code).toBe("ORIGIN_NOT_ALLOWED");
   });
 
+  it("validates and authenticates push-device registration", async () => {
+    const responses = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/api/v1/me/push-device",
+        payload: { token: "", platform: "windows" },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/me/push-device",
+        payload: { token: "device-token", platform: "android" },
+      }),
+      app.inject({ method: "DELETE", url: "/api/v1/me/push-device" }),
+    ]);
+
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      400, 401, 401,
+    ]);
+    expect(responses.map((response) => response.json().error.code)).toEqual([
+      "INVALID_REQUEST",
+      "UNAUTHENTICATED",
+      "UNAUTHENTICATED",
+    ]);
+  });
+
   it("requires a session for the current-user endpoint", async () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/me" });
 

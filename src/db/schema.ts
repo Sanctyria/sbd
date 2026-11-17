@@ -102,6 +102,27 @@ export const userSessions = pgTable(
   ],
 );
 
+export const pushDevices = pgTable(
+  "push_devices",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    sessionTokenHash: text("session_token_hash")
+      .notNull()
+      .references(() => userSessions.tokenHash, { onDelete: "cascade" }),
+    token: text("token").notNull().unique(),
+    platform: text("platform").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("push_devices_user_idx").on(table.userId),
+    index("push_devices_session_idx").on(table.sessionTokenHash),
+  ],
+);
+
 export const profiles = pgTable(
   "profiles",
   {
@@ -491,9 +512,41 @@ export const outboxEvents = pgTable(
       .default({}),
     createdAt: createdAt(),
     publishedAt: timestamp("published_at", { withTimezone: true }),
+    pushProcessedAt: timestamp("push_processed_at", { withTimezone: true }),
   },
   (table) => [
     index("outbox_unpublished_idx").on(table.publishedAt, table.createdAt),
+    index("outbox_push_pending_idx").on(
+      table.pushProcessedAt,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const pushDeliveries = pgTable(
+  "push_deliveries",
+  {
+    eventId: uuid("event_id")
+      .notNull()
+      .references(() => outboxEvents.id, { onDelete: "cascade" }),
+    deviceId: uuid("device_id")
+      .notNull()
+      .references(() => pushDevices.id, { onDelete: "cascade" }),
+    attempts: integer("attempts").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    claimedAt: timestamp("claimed_at", { withTimezone: true }),
+    deliveredAt: timestamp("delivered_at", { withTimezone: true }),
+    lastError: text("last_error"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.eventId, table.deviceId] }),
+    index("push_deliveries_ready_idx").on(
+      table.deliveredAt,
+      table.nextAttemptAt,
+      table.claimedAt,
+    ),
   ],
 );
 
@@ -628,7 +681,9 @@ export const paymentWebhookEvents = pgTable(
     eventType: text("event_type").notNull(),
     amountMinor: integer("amount_minor"),
     currency: text("currency"),
-    receivedAt: createdAt(),
+    receivedAt: timestamp("received_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
   },
   (table) => [
     uniqueIndex("payment_webhook_events_provider_event_uidx").on(

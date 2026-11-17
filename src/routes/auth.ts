@@ -1,7 +1,7 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import argon2 from "argon2";
 import { normalizeIP } from "@fastify/rate-limit";
-import { and, eq, gt, isNull } from "drizzle-orm";
+import { and, eq, gt, isNull, or } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { environment, type Environment } from "../config/env.js";
@@ -10,6 +10,7 @@ import {
   communities,
   communityMemberships,
   profiles,
+  pushDevices,
   userCredentials,
   userSessions,
   users,
@@ -34,6 +35,10 @@ const signupSchema = z.object({
   displayName: z.string().trim().min(1).max(60),
   password: z.string().min(12).max(256),
   turnstileToken: z.string().min(1).max(2048).optional(),
+});
+const pushDeviceSchema = z.object({
+  token: z.string().trim().min(1).max(4096),
+  platform: z.enum(["android", "ios"]),
 });
 
 function hashSessionToken(token: string): string {
@@ -410,6 +415,79 @@ export async function authRoutes(
         .where(eq(userSessions.tokenHash, hashSessionToken(token)));
     }
     reply.clearCookie(config.SESSION_COOKIE_NAME, cookieOptions(config));
+    return reply.code(204).send();
+  });
+
+  app.post("/api/v1/me/push-device", async (request, reply) => {
+    if (!hasAllowedOrigin(request, reply, config)) return;
+    const body = pushDeviceSchema.safeParse(request.body);
+    if (!body.success) {
+      return reply.code(400).send({
+        error: { code: "INVALID_REQUEST", message: "The request is invalid." },
+      });
+    }
+
+    const sessionToken = request.cookies[config.SESSION_COOKIE_NAME];
+    if (!sessionToken) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+    const sessionTokenHash = hashSessionToken(sessionToken);
+    const [session] = await database
+      .select({ userId: userSessions.userId })
+      .from(userSessions)
+      .innerJoin(users, eq(users.id, userSessions.userId))
+      .where(
+        and(
+          eq(userSessions.tokenHash, sessionTokenHash),
+          gt(userSessions.expiresAt, new Date()),
+          isNull(users.deletedAt),
+          isNull(users.suspendedAt),
+        ),
+      )
+      .limit(1);
+    if (!session) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+
+    await database.transaction(async (transaction) => {
+      await transaction
+        .delete(pushDevices)
+        .where(
+          or(
+            eq(pushDevices.sessionTokenHash, sessionTokenHash),
+            eq(pushDevices.token, body.data.token),
+          ),
+        );
+      await transaction
+        .insert(pushDevices)
+        .values({
+          userId: session.userId,
+          sessionTokenHash,
+          token: body.data.token,
+          platform: body.data.platform,
+        });
+    });
+
+    return { registered: true };
+  });
+
+  app.delete("/api/v1/me/push-device", async (request, reply) => {
+    if (!hasAllowedOrigin(request, reply, config)) return;
+    const sessionToken = request.cookies[config.SESSION_COOKIE_NAME];
+    if (!sessionToken) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+    await database
+      .delete(pushDevices)
+      .where(
+        eq(pushDevices.sessionTokenHash, hashSessionToken(sessionToken)),
+      );
     return reply.code(204).send();
   });
 }

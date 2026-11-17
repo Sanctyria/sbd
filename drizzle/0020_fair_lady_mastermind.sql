@@ -1,0 +1,1 @@
+CREATE INDEX "outbox_push_pending_idx" ON "outbox_events" USING btree ("push_processed_at","created_at");

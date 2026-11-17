@@ -8,6 +8,7 @@ import { environment, type Environment } from "./config/env.js";
 import { pool } from "./db/client.js";
 import { pruneAuthRateLimits } from "./lib/authSecurity.js";
 import { authRoutes } from "./routes/auth.js";
+import { startPushDeliveryWorker } from "./lib/pushDelivery.js";
 import { donationRoutes } from "./routes/donations.js";
 import { mutationRoutes } from "./routes/mutations.js";
 import { publicRoutes } from "./routes/public.js";
@@ -180,6 +181,10 @@ export async function buildApp(
   await app.register(mutationRoutes);
   await app.register(publicRoutes);
   await app.register(async (instance) => coreRoutes(instance, config));
+  const stopPushDeliveryWorker = startPushDeliveryWorker(app.log);
+  if (stopPushDeliveryWorker) {
+    app.addHook("onClose", stopPushDeliveryWorker);
+  }
 
   return app;
 }

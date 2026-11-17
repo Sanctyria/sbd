@@ -10,6 +10,7 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 - Journal CMS, community announcement banners, and aggregated analytics.
 - Audited search-index approvals for communities and explicit profile indexing opt-in.
 - Cursor-paginated APIs and server-sent community events.
+- Optional Firebase Cloud Messaging delivery for registered Android and iOS devices.
 - HTTPS link metadata previews with guarded public-host fetching.
 - Cloudflare Turnstile verification and shared PostgreSQL auth-attempt limits.
 - One-time Stripe and PayPal checkout, with verified, idempotent payment webhooks.
@@ -83,6 +84,8 @@ Configuration is loaded from environment variables and validated at startup.
 | `DATABASE_URL`              | Yes      | —                       | PostgreSQL connection URL.                                                            |
 | `SESSION_COOKIE_NAME`       | No       | `sanctyria_session`     | Name of the HTTP-only session cookie.                                                 |
 | `SESSION_COOKIE_SECURE`     | No       | Environment-dependent   | Set `true` behind HTTPS; use `false` only for local HTTP development.                 |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | No   | Empty                   | Firebase Admin service-account JSON; enables the push-delivery worker. Keep it in a deployment secret manager. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | No  | Empty                   | Path to a mounted service-account JSON file; enables the worker via Application Default Credentials. |
 | `TURNSTILE_SITE_KEY`        | Production | —                     | Public Cloudflare Turnstile site key, returned to the login/signup form.               |
 | `TURNSTILE_SECRET_KEY`      | Production | —                     | Cloudflare Turnstile server secret; required in production.                           |
 | `STRIPE_SECRET_KEY`         | No       | —                       | Stripe API secret; requires the webhook secret to enable donations.                   |
@@ -111,6 +114,7 @@ When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with 
 - Configure a PayPal REST app and webhook, then set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and `PAYPAL_ENVIRONMENT=live`. Point PayPal at `https://sanctyria.com/api/community/webhooks/paypal`; signatures are checked through PayPal's verification API. Test with sandbox credentials first.
 - Checkout amounts are one-time USD payments from $1 through $5,000. Cash App and self-hosted crypto wallet transfers are direct payments, not webhook-backed confirmations; configure `CASH_APP_TAG` or all three `CRYPTO_WALLET_*` values only after confirming the destination, asset, and network. Never accept funds on an address whose network/asset has not been verified.
 - `/donate` presents the refund policy and only enables methods configured on the backend. Donations are generally non-refundable, subject to applicable law and payment-provider rules; accidental/unauthorized payment queries should be handled through the support channel.
+- Native push is optional. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply migrations `0019_silly_stryfe.sql` and `0020_fair_lady_mastermind.sql` before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
 
 ## Commands
 
@@ -137,7 +141,7 @@ All API routes are under `/api/v1`.
 | Profiles                 | `GET /profiles/:username`, profile activity and connections, `PATCH /me/profile` (including avatar and banner URLs), follow/unfollow |
 | Communities              | `GET /communities`, `GET /communities/:slug`, membership, members, and community creation/update                                |
 | Feed and content         | `GET /feed`, `GET /posts/:id`, replies, reactions, votes, bookmarks, and reports                                                |
-| Notifications and events | `GET /notifications`, notification reads, and `GET /events` (SSE)                                                               |
+| Notifications and events | `GET /notifications`, notification reads, `GET /events` (SSE), and authenticated `POST`/`DELETE /me/push-device`                |
 | Search and previews      | `GET /search`, `GET /link-preview?url=...`                                                                                      |
 | SEO                      | `GET /seo/sitemap` returns eligible public communities, posts, and opted-in profiles                                            |
 | Marketing                | Published journal reads and `/community/banners`                                                                                |
