@@ -537,7 +537,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
               select 1 from ${userBlocks} as membership_block
               where (membership_block.blocker_id = ${viewerId} and membership_block.blocked_id = ${communityMemberships.userId})
                  or (membership_block.blocker_id = ${communityMemberships.userId} and membership_block.blocked_id = ${viewerId})
-            ))`
+            ))`.mapWith(Number)
           : count(communityMemberships.userId),
         viewerRole: viewerId
           ? sql<string | null>`(

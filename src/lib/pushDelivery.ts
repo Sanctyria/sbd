@@ -19,7 +19,7 @@ const serviceAccountSchema = z.object({
 type ClaimedDelivery = {
   event_id: string;
   device_id: string;
-  token: string;
+  fid: string;
   notification_id: string;
   notification_type: string;
   entity_id: string | null;
@@ -50,7 +50,7 @@ function optionalPayloadString(
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function makeMessage(delivery: ClaimedDelivery) {
+export function makeMessage(delivery: ClaimedDelivery) {
   const title =
     optionalPayloadString(delivery.payload, "title") ??
     optionalPayloadString(delivery.payload, "actorName") ??
@@ -82,7 +82,7 @@ function makeMessage(delivery: ClaimedDelivery) {
             : "";
 
   return {
-    token: delivery.token,
+    fid: delivery.fid,
     notification: { title: title.slice(0, 100), body: body.slice(0, 240) },
     data: {
       notificationId: delivery.notification_id,
@@ -156,7 +156,7 @@ async function claimDeliveries(): Promise<ClaimedDelivery[]> {
       `select
          pd.event_id,
          pd.device_id,
-         d.token,
+        d.token as fid,
          n.id as notification_id,
          n.type as notification_type,
          n.entity_id,
