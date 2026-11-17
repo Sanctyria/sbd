@@ -326,6 +326,8 @@ export const replies = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
     body: text("body").notNull(),
+    mediaUrl: text("media_url"),
+    mediaKind: text("media_kind"),
     voteCount: integer("vote_count").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),

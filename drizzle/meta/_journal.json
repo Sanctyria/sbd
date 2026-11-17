@@ -148,6 +148,13 @@
       "when": 1794872107590,
       "tag": "0020_fair_lady_mastermind",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1794922045568,
+      "tag": "0021_cold_stranger",
+      "breakpoints": true
     }
   ]
 }

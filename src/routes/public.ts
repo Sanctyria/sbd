@@ -1294,6 +1294,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .select({
         id: replies.id,
         body: replies.body,
+        mediaUrl: replies.mediaUrl,
+        mediaKind: replies.mediaKind,
         createdAt: replies.createdAt,
         post: {
           id: posts.id,
@@ -1912,6 +1914,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             )`
           : sql<boolean>`false`,
         body: sql<string>`case when ${replies.deletedAt} is null then ${replies.body} else '' end`,
+        mediaUrl: sql<
+          string | null
+        >`case when ${replies.deletedAt} is null then ${replies.mediaUrl} else null end`,
+        mediaKind: sql<
+          string | null
+        >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (
@@ -2100,6 +2108,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             )`
           : sql<boolean>`false`,
         body: sql<string>`case when ${replies.deletedAt} is null then ${replies.body} else '' end`,
+        mediaUrl: sql<
+          string | null
+        >`case when ${replies.deletedAt} is null then ${replies.mediaUrl} else null end`,
+        mediaKind: sql<
+          string | null
+        >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (

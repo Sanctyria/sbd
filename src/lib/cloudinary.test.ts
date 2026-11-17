@@ -1,0 +1,52 @@
+import { describe, expect, it } from "vitest";
+import {
+  cloudinaryPublicIdFromUrl,
+  cloudinarySignature,
+} from "./cloudinary.js";
+
+describe("Cloudinary upload signing", () => {
+  it("signs the canonical sorted upload parameters", () => {
+    expect(
+      cloudinarySignature(
+        {
+          timestamp: 1_700_000_000,
+          folder: "sanctyria/users/u/profile",
+          overwrite: false,
+        },
+        "secret",
+      ),
+    ).toBe("2e6affd53085442f477b3d45240ce2cb6132e2ba");
+  });
+});
+
+describe("Cloudinary public ID parsing", () => {
+  it("extracts a versioned video asset from the expected folder", () => {
+    expect(
+      cloudinaryPublicIdFromUrl(
+        "https://res.cloudinary.com/demo/video/upload/v123/sanctyria/users/u/replies/id.mp4",
+        "demo",
+        "sanctyria/users/u/replies",
+      ),
+    ).toEqual({
+      publicId: "sanctyria/users/u/replies/id",
+      resourceType: "video",
+    });
+  });
+
+  it("does not accept URLs outside the expected folder", () => {
+    expect(
+      cloudinaryPublicIdFromUrl(
+        "https://res.cloudinary.com/demo/image/upload/sanctyria/users/other/profile/id.jpg",
+        "demo",
+        "sanctyria/users/u/profile",
+      ),
+    ).toBeNull();
+    expect(
+      cloudinaryPublicIdFromUrl(
+        "https://attacker.example/demo/image/upload/sanctyria/users/u/profile/id.jpg",
+        "demo",
+        "sanctyria/users/u/profile",
+      ),
+    ).toBeNull();
+  });
+});

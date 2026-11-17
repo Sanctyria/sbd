@@ -29,6 +29,18 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
     ),
+    CLOUDINARY_CLOUD_NAME: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().trim().regex(/^[a-zA-Z0-9_-]{1,100}$/).optional(),
+    ),
+    CLOUDINARY_API_KEY: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().trim().min(1).max(100).optional(),
+    ),
+    CLOUDINARY_API_SECRET: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().trim().min(1).max(200).optional(),
+    ),
     TURNSTILE_SITE_KEY: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
@@ -112,6 +124,23 @@ const environmentSchema = z
     DATABASE_URL: z.string().url(),
   })
   .superRefine((value, context) => {
+    const cloudinaryCredentials = [
+      value.CLOUDINARY_CLOUD_NAME,
+      value.CLOUDINARY_API_KEY,
+      value.CLOUDINARY_API_SECRET,
+    ];
+    if (
+      cloudinaryCredentials.some(Boolean) &&
+      !cloudinaryCredentials.every(Boolean)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["CLOUDINARY_API_SECRET"],
+        message:
+          "Configure the Cloudinary cloud name, API key, and API secret together.",
+      });
+    }
+
     const turnstileKeys = [
       value.TURNSTILE_SITE_KEY,
       value.TURNSTILE_SECRET_KEY,

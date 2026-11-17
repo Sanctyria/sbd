@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   and,
   asc,
@@ -17,6 +17,11 @@ import { z } from "zod";
 import { environment } from "../config/env.js";
 import { database } from "../db/client.js";
 import { decodeCursor, encodeCursor } from "../lib/cursor.js";
+import {
+  cloudinarySignature,
+  destroyCloudinaryAsset,
+  isCloudinaryConfigured,
+} from "../lib/cloudinary.js";
 import {
   recordEmberScoreChange,
   recordPostEmberRemoval,
@@ -141,9 +146,29 @@ const postUpdateSchema = z
   })
   .refine((value) => Object.keys(value).length > 0);
 const replyBodySchema = z.object({ body: z.string().trim().min(1).max(1000) });
-const createReplySchema = replyBodySchema.extend({
-  parentReplyId: z.string().uuid().optional(),
-});
+const createReplySchema = z
+  .object({
+    body: z.string().trim().max(1000).default(""),
+    parentReplyId: z.string().uuid().optional(),
+    mediaUrl: httpsUrlSchema.optional(),
+    mediaKind: z.enum(["image_url", "video_url"]).optional(),
+  })
+  .superRefine((value, context) => {
+    if (!value.body && !value.mediaUrl) {
+      context.addIssue({
+        code: "custom",
+        path: ["body"],
+        message: "Write a reply or attach media.",
+      });
+    }
+    if (Boolean(value.mediaUrl) !== Boolean(value.mediaKind)) {
+      context.addIssue({
+        code: "custom",
+        path: ["mediaUrl"],
+        message: "Reply media URL and type must be provided together.",
+      });
+    }
+  });
 const notificationReadSchema = z.object({ read: z.literal(true) });
 const moderationQueueQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
@@ -200,6 +225,98 @@ const memberModerationSchema = z.object({
   action: z.enum(["warn", "mute", "unmute", "remove"]),
   reason: z.string().trim().min(10).max(500),
 });
+
+async function cleanupCloudinaryAsset(
+  request: FastifyRequest,
+  value: string | null | undefined,
+  expectedFolder: string,
+  assetScope: string,
+): Promise<void> {
+  try {
+    await destroyCloudinaryAsset(value, expectedFolder, environment);
+  } catch (error) {
+    request.log.error(
+      { err: error, assetScope },
+      "Failed to clean up Cloudinary media.",
+    );
+  }
+}
+
+async function cleanupPostCloudinaryAssets(
+  request: FastifyRequest,
+  postId: string,
+  authorId: string,
+  communityId: string,
+  mediaUrl: string | null,
+): Promise<void> {
+  await cleanupCloudinaryAsset(
+    request,
+    mediaUrl,
+    `sanctyria/users/${authorId}/posts/${communityId}`,
+    "post media",
+  );
+  const replyAssets = await database
+    .select({
+      authorId: replies.authorId,
+      mediaUrl: replies.mediaUrl,
+    })
+    .from(replies)
+    .where(and(eq(replies.postId, postId), isNull(replies.deletedAt)));
+  for (const asset of replyAssets) {
+    await cleanupCloudinaryAsset(
+      request,
+      asset.mediaUrl,
+      `sanctyria/users/${asset.authorId}/replies`,
+      "post reply media",
+    );
+  }
+}
+const uploadSignatureSchema = z
+  .object({
+    purpose: z.enum([
+      "profile-avatar",
+      "profile-banner",
+      "community-avatar",
+      "community-banner",
+      "post-image",
+      "post-video",
+      "reply-attachment",
+    ]),
+    communitySlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+    postId: z.string().uuid().optional(),
+    mediaType: z.enum(["image", "video"]).optional(),
+  })
+  .superRefine((value, context) => {
+    const needsCommunity = value.purpose.startsWith("community-") ||
+      value.purpose.startsWith("post-");
+    if (needsCommunity !== Boolean(value.communitySlug)) {
+      context.addIssue({
+        code: "custom",
+        path: ["communitySlug"],
+        message: "A community is required for this upload type.",
+      });
+    }
+    if (
+      (value.purpose === "reply-attachment") !==
+      Boolean(value.postId && value.mediaType)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["postId"],
+        message: "Reply attachments require a post and media type.",
+      });
+    }
+    if (
+      value.purpose !== "reply-attachment" &&
+      (value.postId !== undefined || value.mediaType !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["mediaType"],
+        message: "Post and media type are only valid for reply attachments.",
+      });
+    }
+  });
 
 function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
@@ -434,6 +551,7 @@ async function manageableReply(userId: string, replyId: string) {
       id: replies.id,
       authorId: replies.authorId,
       postId: replies.postId,
+      mediaUrl: replies.mediaUrl,
       communityId: posts.communityId,
       voteCount: replies.voteCount,
       role: communityMemberships.role,
@@ -677,6 +795,170 @@ async function setPostVote(
 }
 
 export async function mutationRoutes(app: FastifyInstance): Promise<void> {
+  app.post(
+    "/api/v1/uploads/signature",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const body = uploadSignatureSchema.safeParse(request.body);
+      if (!body.success) return invalidRequest(reply);
+      if (!isCloudinaryConfigured(environment)) {
+        return reply.code(503).send({
+          error: {
+            code: "UPLOADS_NOT_CONFIGURED",
+            message: "Media uploads are not configured on the server.",
+          },
+        });
+      }
+
+      const { purpose } = body.data;
+      let folder: string;
+      let resourceType: "image" | "video";
+      let allowedFormats: string[];
+      let maxBytes: number;
+      if (purpose === "profile-avatar" || purpose === "profile-banner") {
+        folder = `sanctyria/users/${userId}/profile`;
+        resourceType = "image";
+        allowedFormats = ["jpg", "jpeg", "png", "webp"];
+        maxBytes = 10 * 1024 * 1024;
+      } else if (purpose.startsWith("community-")) {
+        const [community] = await database
+          .select({
+            id: communities.id,
+            creatorId: communities.creatorId,
+          })
+          .from(communities)
+          .where(
+            and(
+              eq(communities.slug, body.data.communitySlug!),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
+            ),
+          )
+          .limit(1);
+        if (!community) {
+          return reply.code(404).send({
+            error: { code: "COMMUNITY_NOT_FOUND", message: "Community not found." },
+          });
+        }
+        const [membership] = await database
+          .select({ role: communityMemberships.role })
+          .from(communityMemberships)
+          .where(
+            and(
+              eq(communityMemberships.communityId, community.id),
+              eq(communityMemberships.userId, userId),
+            ),
+          )
+          .limit(1);
+        if (community.creatorId !== userId && membership?.role !== "owner") {
+          return reply.code(403).send({
+            error: {
+              code: "COMMUNITY_OWNER_REQUIRED",
+              message: "Only community owners can upload community images.",
+            },
+          });
+        }
+        folder = `sanctyria/communities/${community.id}`;
+        resourceType = "image";
+        allowedFormats = ["jpg", "jpeg", "png", "webp"];
+        maxBytes = 10 * 1024 * 1024;
+      } else if (purpose.startsWith("post-")) {
+        const [community] = await database
+          .select({ id: communities.id })
+          .from(communities)
+          .innerJoin(
+            communityMemberships,
+            eq(communityMemberships.communityId, communities.id),
+          )
+          .where(
+            and(
+              eq(communities.slug, body.data.communitySlug!),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
+              eq(communityMemberships.userId, userId),
+            ),
+          )
+          .limit(1);
+        if (!community) {
+          return reply.code(403).send({
+            error: {
+              code: "COMMUNITY_MEMBERSHIP_REQUIRED",
+              message: "Join the community before uploading post media.",
+            },
+          });
+        }
+        folder = `sanctyria/users/${userId}/posts/${community.id}`;
+        resourceType = purpose === "post-video" ? "video" : "image";
+        allowedFormats =
+          resourceType === "video"
+            ? ["mp4", "mov"]
+            : ["jpg", "jpeg", "png", "webp"];
+        maxBytes =
+          resourceType === "video" ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+      } else {
+        const postId = body.data.postId!;
+        const communityId = await activePostCommunityId(postId);
+        if (!communityId) {
+          return reply.code(404).send({
+            error: { code: "POST_NOT_FOUND", message: "Post not found." },
+          });
+        }
+        const [memberMute] = await database
+          .select({ userId: communityMemberMutes.userId })
+          .from(communityMemberMutes)
+          .where(
+            and(
+              eq(communityMemberMutes.communityId, communityId),
+              eq(communityMemberMutes.userId, userId),
+            ),
+          )
+          .limit(1);
+        if (memberMute) {
+          return reply.code(403).send({
+            error: {
+              code: "COMMUNITY_MEMBER_MUTED",
+              message: "You cannot upload a reply while muted in this community.",
+            },
+          });
+        }
+        resourceType = body.data.mediaType!;
+        folder = `sanctyria/users/${userId}/replies`;
+        allowedFormats =
+          resourceType === "video"
+            ? ["mp4", "mov"]
+            : ["jpg", "jpeg", "png", "webp"];
+        maxBytes =
+          resourceType === "video" ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+      }
+
+      const timestamp = Math.floor(Date.now() / 1000);
+      const publicId = randomUUID();
+      const parameters = {
+        allowed_formats: allowedFormats.join(","),
+        folder,
+        overwrite: false,
+        public_id: publicId,
+        timestamp,
+      };
+      return {
+        cloudName: environment.CLOUDINARY_CLOUD_NAME,
+        apiKey: environment.CLOUDINARY_API_KEY,
+        timestamp,
+        signature: cloudinarySignature(
+          parameters,
+          environment.CLOUDINARY_API_SECRET,
+        ),
+        folder,
+        publicId,
+        resourceType,
+        allowedFormats,
+        maxBytes,
+        maxVideoDurationSeconds: resourceType === "video" ? 180 : null,
+      };
+    },
+  );
   app.get("/api/v1/moderation/actions", async (request, reply) => {
     const userId = await authenticatedUserId(request, reply);
     if (!userId) return;
@@ -950,6 +1232,46 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "REPORT_NOT_FOUND", message: "Report not found." },
       });
+    }
+    if (body.data.removeContent) {
+      if (report.targetType === "post") {
+        const [asset] = await database
+          .select({
+            id: posts.id,
+            authorId: posts.authorId,
+            communityId: posts.communityId,
+            url: posts.url,
+          })
+          .from(posts)
+          .where(eq(posts.id, report.targetId))
+          .limit(1);
+        if (asset) {
+          await cleanupPostCloudinaryAssets(
+            request,
+            asset.id,
+            asset.authorId,
+            asset.communityId,
+            asset.url,
+          );
+        }
+      } else {
+        const [asset] = await database
+          .select({
+            authorId: replies.authorId,
+            mediaUrl: replies.mediaUrl,
+          })
+          .from(replies)
+          .where(eq(replies.id, report.targetId))
+          .limit(1);
+        if (asset) {
+          await cleanupCloudinaryAsset(
+            request,
+            asset.mediaUrl,
+            `sanctyria/users/${asset.authorId}/replies`,
+            "moderated reply media",
+          );
+        }
+      }
     }
     if (updatedReport && body.data.removeContent && indexableCommunitySlug) {
       notifyIndexNow(
@@ -1613,7 +1935,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           entityId: updated.id,
           payload: { slug: updated.slug, previousSlug: community.slug },
         });
-        return { kind: "updated" as const, community: updated };
+        return {
+          kind: "updated" as const,
+          community: updated,
+          previousAvatarUrl: community.avatarUrl,
+          previousBannerUrl: community.bannerUrl,
+        };
       });
 
       if (result.kind === "notFound") {
@@ -1639,6 +1966,22 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             message: "That community name is already in use.",
           },
         });
+      }
+      if (result.previousAvatarUrl !== result.community.avatarUrl) {
+        await cleanupCloudinaryAsset(
+          request,
+          result.previousAvatarUrl,
+          `sanctyria/communities/${result.community.id}`,
+          "community avatar",
+        );
+      }
+      if (result.previousBannerUrl !== result.community.bannerUrl) {
+        await cleanupCloudinaryAsset(
+          request,
+          result.previousBannerUrl,
+          `sanctyria/communities/${result.community.id}`,
+          "community banner",
+        );
       }
       const indexableCommunitySlug = await getIndexableCommunitySlug(result.community.id);
       const urls = [
@@ -1981,6 +2324,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       .select({
         username: profiles.username,
         bio: profiles.bio,
+        avatarUrl: profiles.avatarUrl,
+        bannerUrl: profiles.bannerUrl,
         indexingOptedIn: profiles.isIndexingOptedIn,
       })
       .from(profiles)
@@ -2047,6 +2392,28 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).send({
         error: { code: "PROFILE_NOT_FOUND", message: "Profile not found." },
       });
+    }
+    if (
+      existingProfile?.avatarUrl !== profile.avatarUrl &&
+      existingProfile?.avatarUrl
+    ) {
+      await cleanupCloudinaryAsset(
+        request,
+        existingProfile.avatarUrl,
+        `sanctyria/users/${userId}/profile`,
+        "profile avatar",
+      );
+    }
+    if (
+      existingProfile?.bannerUrl !== profile.bannerUrl &&
+      existingProfile?.bannerUrl
+    ) {
+      await cleanupCloudinaryAsset(
+        request,
+        existingProfile.bannerUrl,
+        `sanctyria/users/${userId}/profile`,
+        "profile banner",
+      );
     }
     const isIndexable = await isProfileIndexable(
       userId,
@@ -2931,6 +3298,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         environment.NODE_ENV === "production",
       );
     }
+    if (post.url !== updatedPost.url) {
+      await cleanupCloudinaryAsset(
+        request,
+        post.url,
+        `sanctyria/users/${post.authorId}/posts/${post.communityId}`,
+        "post media",
+      );
+    }
     return { post: updatedPost };
   });
 
@@ -2976,6 +3351,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    await cleanupPostCloudinaryAssets(
+      request,
+      post.id,
+      post.authorId,
+      post.communityId,
+      post.url,
+    );
     if (indexableCommunitySlug) {
       notifyIndexNow(
         [indexNowPageUrl(`/p/${encodeURIComponent(post.id)}`)],
@@ -3081,6 +3463,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             postId: params.data.id,
             authorId: userId,
             body: body.data.body,
+            mediaUrl: body.data.mediaUrl ?? null,
+            mediaKind: body.data.mediaKind ?? null,
             parentReplyId: body.data.parentReplyId ?? null,
           })
           .returning({ id: replies.id });
@@ -3115,7 +3499,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                     replyId: targetKind === "reply" ? newReply.id : undefined,
                     actorUsername: replyAuthor?.username ?? "member",
                     actorName: replyAuthor?.displayName ?? "A community member",
-                    preview: body.data.body.slice(0, 180),
+                    preview:
+                      body.data.body.slice(0, 180) ||
+                      (body.data.mediaKind === "video_url"
+                        ? "Shared a video."
+                        : "Shared an image."),
                   },
                 })),
               )
@@ -3306,6 +3694,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });
     }
+    await cleanupCloudinaryAsset(
+      request,
+      target.mediaUrl,
+      `sanctyria/users/${target.authorId}/replies`,
+      "deleted reply media",
+    );
     if (indexableCommunitySlug) {
       notifyIndexNow(
         [indexNowPageUrl(`/p/${encodeURIComponent(target.postId)}`)],

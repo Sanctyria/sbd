@@ -12,6 +12,7 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 - Cursor-paginated APIs and server-sent community events.
 - Optional Firebase Cloud Messaging delivery for registered Android and iOS devices.
 - HTTPS link metadata previews with guarded public-host fetching.
+- Signed Cloudinary uploads for profile, community, post, and reply media.
 - Cloudflare Turnstile verification and shared PostgreSQL auth-attempt limits.
 - One-time Stripe and PayPal checkout, with verified, idempotent payment webhooks.
 
@@ -86,6 +87,9 @@ Configuration is loaded from environment variables and validated at startup.
 | `SESSION_COOKIE_SECURE`     | No       | Environment-dependent   | Set `true` behind HTTPS; use `false` only for local HTTP development.                 |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No   | Empty                   | Firebase Admin service-account JSON; enables the push-delivery worker. Keep it in a deployment secret manager. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | No  | Empty                   | Path to a mounted service-account JSON file; enables the worker via Application Default Credentials. |
+| `CLOUDINARY_CLOUD_NAME`     | No       | —                       | Cloudinary cloud name for signed uploads. Configure together with the API key and secret. |
+| `CLOUDINARY_API_KEY`        | No       | —                       | Cloudinary API key; returned only as a public upload parameter. |
+| `CLOUDINARY_API_SECRET`     | No       | —                       | Cloudinary API secret used for server-side signatures and asset cleanup. Never expose it to the app. |
 | `TURNSTILE_SITE_KEY`        | Production | —                     | Public Cloudflare Turnstile site key, returned to the login/signup form.               |
 | `TURNSTILE_SECRET_KEY`      | Production | —                     | Cloudflare Turnstile server secret; required in production.                           |
 | `STRIPE_SECRET_KEY`         | No       | —                       | Stripe API secret; requires the webhook secret to enable donations.                   |
@@ -114,7 +118,8 @@ When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with 
 - Configure a PayPal REST app and webhook, then set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and `PAYPAL_ENVIRONMENT=live`. Point PayPal at `https://sanctyria.com/api/community/webhooks/paypal`; signatures are checked through PayPal's verification API. Test with sandbox credentials first.
 - Checkout amounts are one-time USD payments from $1 through $5,000. Cash App and self-hosted crypto wallet transfers are direct payments, not webhook-backed confirmations; configure `CASH_APP_TAG` or all three `CRYPTO_WALLET_*` values only after confirming the destination, asset, and network. Never accept funds on an address whose network/asset has not been verified.
 - `/donate` presents the refund policy and only enables methods configured on the backend. Donations are generally non-refundable, subject to applicable law and payment-provider rules; accidental/unauthorized payment queries should be handled through the support channel.
-- Native push is optional. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply migrations `0019_silly_stryfe.sql` and `0020_fair_lady_mastermind.sql` before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
+- Native push is optional. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply migrations `0019_silly_stryfe.sql`, `0020_fair_lady_mastermind.sql`, and `0021_cold_stranger.sql` before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
+- Mobile uploads use signed Cloudinary requests. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend environment/secret manager. The API secret must never be added to Flutter build defines or client configuration. The app enforces 10 MB images and 50 MB videos (up to 3 minutes); also set appropriate upload limits in the Cloudinary account.
 
 ## Commands
 
