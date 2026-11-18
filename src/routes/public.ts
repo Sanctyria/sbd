@@ -29,6 +29,7 @@ import {
   communitySlugAliases,
   communityMemberships,
   communityMemberMutes,
+  communityNotificationMutes,
   emberEvents,
   notifications,
   postReactions,
@@ -618,6 +619,14 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
                 and ${communityMemberships.userId} = ${viewerId}
             )`
           : sql<string | null>`null`,
+        notificationsMuted: viewerId
+          ? sql<boolean>`exists (
+              select 1
+              from ${communityNotificationMutes}
+              where ${communityNotificationMutes.userId} = ${viewerId}
+                and ${communityNotificationMutes.communityId} = ${communities.id}
+            )`
+          : sql<boolean>`false`,
       })
       .from(communities)
       .leftJoin(

@@ -8,6 +8,7 @@ import {
   gt,
   inArray,
   isNull,
+  ne,
   lt,
   or,
   sql,
@@ -39,9 +40,11 @@ import {
   communitySlugAliases,
   communityMemberships,
   communityMemberMutes,
+  communityNotificationMutes,
   idempotencyRecords,
   moderationActions,
   notifications,
+  notificationPreferences,
   outboxEvents,
   postReactions,
   replyReactions,
@@ -113,7 +116,7 @@ const postBodySchema = z
   .object({
     community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
     kind: z.enum(["text", "link", "image_url", "video_url"]),
-    body: z.string().trim().max(1000).default(""),
+    body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
     url: httpsUrlSchema.optional(),
   })
   .superRefine((value, context) => {
@@ -170,6 +173,18 @@ const createReplySchema = z
     }
   });
 const notificationReadSchema = z.object({ read: z.literal(true) });
+const notificationSettingsSchema = z
+  .object({
+    communityPosts: z.boolean(),
+    followingPosts: z.boolean(),
+    replies: z.boolean(),
+    mentions: z.boolean(),
+    likes: z.boolean(),
+    follows: z.boolean(),
+    communityUpdates: z.boolean(),
+  })
+  .strict();
+const communityNotificationMuteSchema = z.object({ muted: z.boolean() });
 const moderationQueueQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
@@ -404,6 +419,36 @@ async function storeIdempotencyResponse(
         eq(idempotencyRecords.key, context.key),
       ),
     );
+}
+
+type NotificationPreferenceName =
+    | "communityPosts"
+    | "followingPosts"
+    | "replies"
+    | "mentions"
+    | "likes"
+    | "follows"
+    | "communityUpdates";
+
+async function filterEnabledNotificationRecipients(
+    transaction: DatabaseTransaction,
+    recipientIds: string[],
+    category: NotificationPreferenceName,
+): Promise<string[]> {
+    const uniqueIds = [...new Set(recipientIds)];
+    if (!uniqueIds.length) return [];
+    const enabledPreference = notificationPreferences[category];
+    const disabled = await transaction
+      .select({ userId: notificationPreferences.userId })
+      .from(notificationPreferences)
+      .where(
+        and(
+          inArray(notificationPreferences.userId, uniqueIds),
+          eq(enabledPreference, false),
+        ),
+      );
+    const disabledIds = new Set(disabled.map(({ userId }) => userId));
+    return uniqueIds.filter((userId) => !disabledIds.has(userId));
 }
 
 function sendIdempotencyClaim(
@@ -766,7 +811,15 @@ async function setPostVote(
         .from(profiles)
         .where(eq(profiles.userId, userId))
         .limit(1);
-      if (postAuthor && postAuthor.userId !== userId) {
+      if (
+        postAuthor &&
+        postAuthor.userId !== userId &&
+        (await filterEnabledNotificationRecipients(
+          transaction,
+          [postAuthor.userId],
+          "likes",
+        )).length
+      ) {
         const [notification] = await transaction
           .insert(notifications)
           .values({
@@ -1328,6 +1381,105 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     return { updatedCount: updated.length };
   });
 
+  app.get("/api/v1/me/notification-settings", async (request, reply) => {
+    const userId = await authenticatedUserId(request, reply);
+    if (!userId) return;
+    const [settings] = await database
+      .select({
+        communityPosts: notificationPreferences.communityPosts,
+        followingPosts: notificationPreferences.followingPosts,
+        replies: notificationPreferences.replies,
+        mentions: notificationPreferences.mentions,
+        likes: notificationPreferences.likes,
+        follows: notificationPreferences.follows,
+        communityUpdates: notificationPreferences.communityUpdates,
+      })
+      .from(notificationPreferences)
+      .where(eq(notificationPreferences.userId, userId))
+      .limit(1);
+    return {
+      settings: settings ?? {
+        communityPosts: true,
+        followingPosts: true,
+        replies: true,
+        mentions: true,
+        likes: true,
+        follows: true,
+        communityUpdates: true,
+      },
+    };
+  });
+
+  app.patch("/api/v1/me/notification-settings", async (request, reply) => {
+    const userId = await authenticatedUserId(request, reply);
+    if (!userId) return;
+    const body = notificationSettingsSchema.safeParse(request.body);
+    if (!body.success) return invalidRequest(reply);
+    const [settings] = await database
+      .insert(notificationPreferences)
+      .values({ userId, ...body.data, updatedAt: new Date() })
+      .onConflictDoUpdate({
+        target: notificationPreferences.userId,
+        set: { ...body.data, updatedAt: new Date() },
+      })
+      .returning({
+        communityPosts: notificationPreferences.communityPosts,
+        followingPosts: notificationPreferences.followingPosts,
+        replies: notificationPreferences.replies,
+        mentions: notificationPreferences.mentions,
+        likes: notificationPreferences.likes,
+        follows: notificationPreferences.follows,
+        communityUpdates: notificationPreferences.communityUpdates,
+      });
+    return { settings };
+  });
+
+  app.patch(
+    "/api/v1/communities/:slug/notification-mute",
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = slugParamsSchema.safeParse(request.params);
+      const body = communityNotificationMuteSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      const [community] = await database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
+        });
+      }
+      if (body.data.muted) {
+        await database
+          .insert(communityNotificationMutes)
+          .values({ userId, communityId: community.id })
+          .onConflictDoNothing();
+      } else {
+        await database
+          .delete(communityNotificationMutes)
+          .where(
+            and(
+              eq(communityNotificationMutes.userId, userId),
+              eq(communityNotificationMutes.communityId, community.id),
+            ),
+          );
+      }
+      return { muted: body.data.muted };
+    },
+  );
+
   app.post(
     "/api/v1/reports",
     { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
@@ -1540,29 +1692,39 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             action: `role_${result.role}`,
             reason: `Community owner ${actor?.username ?? "unknown"} changed the member role.`,
           });
-          const [notification] = await transaction
-            .insert(notifications)
-            .values({
-              recipientId: target.userId,
-              type: "community",
-              entityId: community.id,
-              payload: {
-                action: "role_changed",
-                actorUsername: actor?.username ?? "member",
-                actorName: actor?.displayName ?? "the community owner",
-                title: `Your role in ${community.name} changed to ${result.role}`,
-                detail: `Updated by ${actor?.displayName ?? "the community owner"}.`,
-                communitySlug: community.slug,
-              },
-            })
-            .returning({ id: notifications.id });
-          if (notification) {
-            await transaction.insert(outboxEvents).values({
-              topic: "notification.created",
-              recipientId: target.userId,
-              entityId: notification.id,
-              payload: { notificationId: notification.id },
-            });
+          if (
+            (
+              await filterEnabledNotificationRecipients(
+                transaction,
+                [target.userId],
+                "communityUpdates",
+              )
+            ).length
+          ) {
+            const [notification] = await transaction
+              .insert(notifications)
+              .values({
+                recipientId: target.userId,
+                type: "community",
+                entityId: community.id,
+                payload: {
+                  action: "role_changed",
+                  actorUsername: actor?.username ?? "member",
+                  actorName: actor?.displayName ?? "the community owner",
+                  title: `Your role in ${community.name} changed to ${result.role}`,
+                  detail: `Updated by ${actor?.displayName ?? "the community owner"}.`,
+                  communitySlug: community.slug,
+                },
+              })
+              .returning({ id: notifications.id });
+            if (notification) {
+              await transaction.insert(outboxEvents).values({
+                topic: "notification.created",
+                recipientId: target.userId,
+                entityId: notification.id,
+                payload: { notificationId: notification.id },
+              });
+            }
           }
         }
         return [result];
@@ -1764,36 +1926,46 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           action: actionName,
           reason: body.data.reason,
         });
-        const [notification] = await transaction
-          .insert(notifications)
-          .values({
-            recipientId: target.id,
-            type: "community",
-            entityId: community.id,
-            payload: {
-              action: actionName,
-              actorUsername: actor?.username ?? "member",
-              actorName: actor?.displayName ?? "A community moderator",
-              title:
-                body.data.action === "warn"
-                  ? `A moderator sent you a warning in ${community.name}`
-                  : body.data.action === "mute"
-                    ? `You were muted in ${community.name}`
-                    : body.data.action === "unmute"
-                      ? `Your mute was lifted in ${community.name}`
-                      : `You were removed from ${community.name}`,
-              detail: body.data.reason,
-              communitySlug: community.slug,
-            },
-          })
-          .returning({ id: notifications.id });
-        if (notification) {
-          await transaction.insert(outboxEvents).values({
-            topic: "notification.created",
-            recipientId: target.id,
-            entityId: notification.id,
-            payload: { notificationId: notification.id },
-          });
+        if (
+          (
+            await filterEnabledNotificationRecipients(
+              transaction,
+              [target.id],
+              "communityUpdates",
+            )
+          ).length
+        ) {
+          const [notification] = await transaction
+            .insert(notifications)
+            .values({
+              recipientId: target.id,
+              type: "community",
+              entityId: community.id,
+              payload: {
+                action: actionName,
+                actorUsername: actor?.username ?? "member",
+                actorName: actor?.displayName ?? "A community moderator",
+                title:
+                  body.data.action === "warn"
+                    ? `A moderator sent you a warning in ${community.name}`
+                    : body.data.action === "mute"
+                      ? `You were muted in ${community.name}`
+                      : body.data.action === "unmute"
+                        ? `Your mute was lifted in ${community.name}`
+                        : `You were removed from ${community.name}`,
+                detail: body.data.reason,
+                communitySlug: community.slug,
+              },
+            })
+            .returning({ id: notifications.id });
+          if (notification) {
+            await transaction.insert(outboxEvents).values({
+              topic: "notification.created",
+              recipientId: target.id,
+              entityId: notification.id,
+              payload: { notificationId: notification.id },
+            });
+          }
         }
         if (body.data.action === "remove") {
           await transaction.insert(outboxEvents).values({
@@ -2127,6 +2299,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
 
         const affectedUsers = [...new Set([target.id, previousOwnerId])];
         for (const recipientId of affectedUsers) {
+          if (
+            !(
+              await filterEnabledNotificationRecipients(
+                transaction,
+                [recipientId],
+                "communityUpdates",
+              )
+            ).length
+          ) {
+            continue;
+          }
           const [notification] = await transaction
             .insert(notifications)
             .values({
@@ -2514,28 +2697,39 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           entityId: target.userId,
           payload: { followedBy: userId },
         });
-        const [notification] = await transaction
-          .insert(notifications)
-          .values({
-            recipientId: target.userId,
-            type: "system",
-            entityId: userId,
-            payload: {
-              action: "follow",
-              actorUsername: followerProfile?.username ?? "member",
-              actorName: followerProfile?.displayName ?? "A community member",
-              title: `${followerProfile?.displayName ?? "A community member"} started following you`,
-              detail: `@${followerProfile?.username ?? "member"} followed you.`,
-            },
-          })
-          .returning({ id: notifications.id });
-        if (notification) {
-          await transaction.insert(outboxEvents).values({
-            topic: "notification.created",
-            recipientId: target.userId,
-            entityId: notification.id,
-            payload: { notificationId: notification.id },
-          });
+        if (
+          (
+            await filterEnabledNotificationRecipients(
+              transaction,
+              [target.userId],
+              "follows",
+            )
+          ).length
+        ) {
+          const [notification] = await transaction
+            .insert(notifications)
+            .values({
+              recipientId: target.userId,
+              type: "system",
+              entityId: userId,
+              payload: {
+                action: "follow",
+                actorUsername: followerProfile?.username ?? "member",
+                actorName:
+                  followerProfile?.displayName ?? "A community member",
+                title: `${followerProfile?.displayName ?? "A community member"} started following you`,
+                detail: `@${followerProfile?.username ?? "member"} followed you.`,
+              },
+            })
+            .returning({ id: notifications.id });
+          if (notification) {
+            await transaction.insert(outboxEvents).values({
+              topic: "notification.created",
+              recipientId: target.userId,
+              entityId: notification.id,
+              payload: { notificationId: notification.id },
+            });
+          }
         }
       }
     });
@@ -2912,15 +3106,19 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               inArray(communityMemberships.role, ["owner", "moderator"]),
             ),
           );
-        const recipients = managers.filter(
-          (manager) => manager.recipientId !== userId,
+        const recipients = await filterEnabledNotificationRecipients(
+          transaction,
+          managers
+            .filter((manager) => manager.recipientId !== userId)
+            .map((manager) => manager.recipientId),
+          "communityUpdates",
         );
         if (recipients.length) {
           const createdNotifications = await transaction
             .insert(notifications)
             .values(
-              recipients.map((recipient) => ({
-                recipientId: recipient.recipientId,
+              recipients.map((recipientId) => ({
+                recipientId,
                 type: "community" as const,
                 entityId: community.id,
                 payload: {
@@ -3008,15 +3206,19 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               inArray(communityMemberships.role, ["owner", "moderator"]),
             ),
           );
-        const recipients = managers.filter(
-          (manager) => manager.recipientId !== userId,
+        const recipients = await filterEnabledNotificationRecipients(
+          transaction,
+          managers
+            .filter((manager) => manager.recipientId !== userId)
+            .map((manager) => manager.recipientId),
+          "communityUpdates",
         );
         if (recipients.length) {
           const createdNotifications = await transaction
             .insert(notifications)
             .values(
-              recipients.map((recipient) => ({
-                recipientId: recipient.recipientId,
+              recipients.map((recipientId) => ({
+                recipientId,
                 type: "community" as const,
                 entityId: community.id,
                 payload: {
@@ -3059,7 +3261,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       if (!body.success) return invalidRequest(reply);
 
       const [community] = await database
-        .select({ id: communities.id })
+        .select({
+          id: communities.id,
+          name: communities.name,
+          slug: communities.slug,
+        })
         .from(communities)
         .where(
           and(
@@ -3159,6 +3365,117 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             entityId: post.id,
             payload: { postId: post.id },
           });
+          const eligibleCommunityMember = sql<boolean>`(
+            ${communityMemberships.userId} is not null
+            and coalesce(${notificationPreferences.communityPosts}, true)
+            and not exists (
+              select 1
+              from ${communityNotificationMutes}
+              where ${communityNotificationMutes.userId} = ${profiles.userId}
+                and ${communityNotificationMutes.communityId} = ${community.id}
+            )
+          )`;
+          const eligibleFollower = sql<boolean>`(
+            ${userFollows.followerId} is not null
+            and coalesce(${notificationPreferences.followingPosts}, true)
+            and not exists (
+              select 1
+              from ${communityNotificationMutes}
+              where ${communityNotificationMutes.userId} = ${profiles.userId}
+                and ${communityNotificationMutes.communityId} = ${community.id}
+            )
+          )`;
+          const postRecipients = await transaction
+            .select({
+              recipientId: profiles.userId,
+              eligibleCommunityMember,
+            })
+            .from(profiles)
+            .innerJoin(users, eq(users.id, profiles.userId))
+            .leftJoin(
+              communityMemberships,
+              and(
+                eq(communityMemberships.communityId, community.id),
+                eq(communityMemberships.userId, profiles.userId),
+              ),
+            )
+            .leftJoin(
+              userFollows,
+              and(
+                eq(userFollows.followerId, profiles.userId),
+                eq(userFollows.followedId, userId),
+              ),
+            )
+            .leftJoin(
+              notificationPreferences,
+              eq(notificationPreferences.userId, profiles.userId),
+            )
+            .where(
+              and(
+                ne(profiles.userId, userId),
+                isNull(users.deletedAt),
+                isNull(users.suspendedAt),
+                sql`not exists (
+                  select 1
+                  from ${userBlocks}
+                  where (${userBlocks.blockerId} = ${profiles.userId}
+                    and ${userBlocks.blockedId} = ${userId})
+                    or (${userBlocks.blockerId} = ${userId}
+                    and ${userBlocks.blockedId} = ${profiles.userId})
+                )`,
+                or(eligibleCommunityMember, eligibleFollower),
+              ),
+            );
+          if (postRecipients.length) {
+            const createdNotifications = await transaction
+              .insert(notifications)
+              .values(
+                postRecipients.map((recipient) => {
+                  const action = recipient.eligibleCommunityMember
+                    ? "community_post"
+                    : "following_post";
+                  return {
+                    recipientId: recipient.recipientId,
+                    type: "post" as const,
+                    entityId: post.id,
+                    payload: {
+                      action,
+                      title: recipient.eligibleCommunityMember
+                        ? `${postAuthor?.displayName ?? "A member"} posted in ${community.name}`
+                        : `${postAuthor?.displayName ?? "A member"} posted something new`,
+                      detail: body.data.body,
+                      actorUsername: postAuthor?.username ?? "member",
+                      actorName:
+                        postAuthor?.displayName ?? "A community member",
+                      communityName: community.name,
+                      communitySlug: community.slug,
+                      postPreview: body.data.body.slice(0, 180),
+                      postUrl: url ?? "",
+                      mediaUrl:
+                        body.data.kind === "image_url" ||
+                            body.data.kind === "video_url"
+                          ? url ?? ""
+                          : "",
+                      mediaKind: body.data.kind,
+                    },
+                  };
+                }),
+              )
+              .returning({
+                id: notifications.id,
+                recipientId: notifications.recipientId,
+              });
+            if (createdNotifications.length) {
+              await transaction.insert(outboxEvents).values(
+                createdNotifications.map((notification) => ({
+                  topic: "notification.created",
+                  recipientId: notification.recipientId,
+                  entityId: notification.id,
+                  payload: { notificationId: notification.id },
+                })),
+              );
+            }
+          }
           const mentionedUsernames = extractMentionUsernames(body.data.body);
           if (mentionedUsernames.length) {
             const mentionedProfiles = await transaction
@@ -3171,15 +3488,19 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                   isNull(users.deletedAt),
                 ),
               );
-            const recipients = mentionedProfiles.filter(
-              (profile) => profile.recipientId !== userId,
+            const recipients = await filterEnabledNotificationRecipients(
+              transaction,
+              mentionedProfiles
+                .filter((profile) => profile.recipientId !== userId)
+                .map((profile) => profile.recipientId),
+              "mentions",
             );
             if (recipients.length) {
               const createdNotifications = await transaction
                 .insert(notifications)
                 .values(
-                  recipients.map((recipient) => ({
-                    recipientId: recipient.recipientId,
+                  recipients.map((recipientId) => ({
+                    recipientId,
                     type: "mention" as const,
                     entityId: post.id,
                     payload: {
@@ -3486,29 +3807,39 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           if (parentAuthorId && parentAuthorId !== userId) {
             notificationTargets.set(parentAuthorId, "reply");
           }
-          if (notificationTargets.size) {
+          const enabledReplyRecipients =
+            await filterEnabledNotificationRecipients(
+              transaction,
+              [...notificationTargets.keys()],
+              "replies",
+            );
+          if (enabledReplyRecipients.length) {
             const createdNotifications = await transaction
               .insert(notifications)
               .values(
-                [...notificationTargets].map(([recipientId, targetKind]) => ({
-                  recipientId,
-                  type: "reply" as const,
-                  entityId: params.data.id,
-                  payload: {
-                    targetKind,
-                    replyId:
-                      targetKind === "reply"
-                        ? body.data.parentReplyId
-                        : undefined,
-                    actorUsername: replyAuthor?.username ?? "member",
-                    actorName: replyAuthor?.displayName ?? "A community member",
-                    preview:
-                      body.data.body.slice(0, 180) ||
-                      (body.data.mediaKind === "video_url"
-                        ? "Shared a video."
-                        : "Shared an image."),
-                  },
-                })),
+                enabledReplyRecipients.map((recipientId) => {
+                  const targetKind = notificationTargets.get(recipientId)!;
+                  return {
+                    recipientId,
+                    type: "reply" as const,
+                    entityId: params.data.id,
+                    payload: {
+                      targetKind,
+                      replyId:
+                        targetKind === "reply"
+                          ? body.data.parentReplyId
+                          : undefined,
+                      actorUsername: replyAuthor?.username ?? "member",
+                      actorName:
+                        replyAuthor?.displayName ?? "A community member",
+                      preview:
+                        body.data.body.slice(0, 180) ||
+                        (body.data.mediaKind === "video_url"
+                          ? "Shared a video."
+                          : "Shared an image."),
+                    },
+                  };
+                }),
               )
               .returning({
                 id: notifications.id,
@@ -3537,18 +3868,24 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                   isNull(users.deletedAt),
                 ),
               );
-            const recipients = mentionedProfiles.filter(
-              (profile) =>
-                profile.recipientId !== userId &&
-                profile.recipientId !== postAuthor?.userId &&
-                profile.recipientId !== parentAuthorId,
+            const recipients = await filterEnabledNotificationRecipients(
+              transaction,
+              mentionedProfiles
+                .filter(
+                  (profile) =>
+                    profile.recipientId !== userId &&
+                    profile.recipientId !== postAuthor?.userId &&
+                    profile.recipientId !== parentAuthorId,
+                )
+                .map((profile) => profile.recipientId),
+              "mentions",
             );
             if (recipients.length) {
               const createdNotifications = await transaction
                 .insert(notifications)
                 .values(
-                  recipients.map((recipient) => ({
-                    recipientId: recipient.recipientId,
+                  recipients.map((recipientId) => ({
+                    recipientId,
                     type: "mention" as const,
                     entityId: params.data.id,
                     payload: {

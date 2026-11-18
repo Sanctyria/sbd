@@ -38,6 +38,7 @@ export const notificationTypeEnum = pgEnum("notification_type", [
   "reply",
   "mention",
   "reaction",
+  "post",
   "community",
   "system",
 ]);
@@ -445,6 +446,37 @@ export const notifications = pgTable(
       table.createdAt,
       table.id,
     ),
+  ],
+);
+
+export const notificationPreferences = pgTable("notification_preferences", {
+  userId: uuid("user_id")
+    .primaryKey()
+    .references(() => users.id, { onDelete: "cascade" }),
+  communityPosts: boolean("community_posts").notNull().default(true),
+  followingPosts: boolean("following_posts").notNull().default(true),
+  replies: boolean("replies").notNull().default(true),
+  mentions: boolean("mentions").notNull().default(true),
+  likes: boolean("likes").notNull().default(true),
+  follows: boolean("follows").notNull().default(true),
+  communityUpdates: boolean("community_updates").notNull().default(true),
+  updatedAt: updatedAt(),
+});
+
+export const communityNotificationMutes = pgTable(
+  "community_notification_mutes",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id, { onDelete: "cascade" }),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.communityId] }),
+    index("community_notification_mutes_community_idx").on(table.communityId),
   ],
 );
 

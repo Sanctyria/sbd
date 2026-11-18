@@ -103,6 +103,30 @@ describe("push delivery message", () => {
     expect(message.apns.payload.aps.category).toBeUndefined();
   });
 
+  it("formats new community post notifications with a post deep link", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "post",
+      entity_id: "post-id",
+      payload: {
+        action: "community_post",
+        title: "Mira Voss posted in Worldbuilding",
+        postPreview: "A new illustrated map.",
+      },
+      attempts: 0,
+    });
+
+    expect(message.data).toMatchObject({
+      title: "Mira Voss posted in Worldbuilding",
+      body: "A new illustrated map.",
+      deepLink: "https://sanctyria.com/p/post-id",
+      notificationType: "post",
+    });
+  });
+
   it("includes media and avatar metadata for rich Android notifications", () => {
     const message = makeMessage({
       event_id: "event-id",

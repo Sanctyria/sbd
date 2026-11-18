@@ -182,6 +182,9 @@ export function makeMessage(delivery: ClaimedDelivery) {
           ? `${actorName} mentioned you`
           : delivery.notification_type === "reaction"
             ? `${actorName} liked your post`
+              : delivery.notification_type === "post"
+                ? optionalPayloadString(delivery.payload, "title") ??
+                  `${actorName} posted something new`
             : delivery.notification_type === "community"
               ? `${actorName} updated ${communityName ?? "your community"}`
               : "Sanctyria update");
@@ -191,6 +194,8 @@ export function makeMessage(delivery: ClaimedDelivery) {
       ? `@${actorUsername ?? "member"} followed you.`
       : delivery.notification_type === "reaction"
         ? postPreview ?? "Tap to see the post they liked."
+        : delivery.notification_type === "post"
+          ? postPreview ?? "Tap to see the new post."
         : delivery.notification_type === "reply" ||
             delivery.notification_type === "mention"
           ? [
