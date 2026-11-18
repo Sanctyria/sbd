@@ -37,6 +37,7 @@ import {
 import {
   bookmarks,
   communities,
+  communityContentCooldowns,
   communitySlugAliases,
   communityMemberships,
   communityMemberMutes,
@@ -76,6 +77,8 @@ type IdempotencyClaim =
 
 const MAX_ACTIVE_EVENT_STREAMS = 100;
 const MAX_EVENT_STREAM_DURATION_MS = 15 * 60 * 1000;
+const POST_CREATION_COOLDOWN_SECONDS = 60;
+const REPLY_CREATION_COOLDOWN_SECONDS = 15;
 let activeEventStreamCount = 0;
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
@@ -419,6 +422,86 @@ async function storeIdempotencyResponse(
         eq(idempotencyRecords.key, context.key),
       ),
     );
+}
+
+async function releaseIdempotencyClaim(
+  transaction: DatabaseTransaction,
+  context: IdempotencyContext,
+): Promise<void> {
+  await transaction
+    .delete(idempotencyRecords)
+    .where(
+      and(
+        eq(idempotencyRecords.userId, context.userId),
+        eq(idempotencyRecords.scope, context.scope),
+        eq(idempotencyRecords.key, context.key),
+      ),
+    );
+}
+
+async function claimContentCooldown(
+  transaction: DatabaseTransaction,
+  userId: string,
+  action: "post" | "reply",
+  cooldownSeconds: number,
+): Promise<number | null> {
+  const now = new Date();
+  const nextAllowedAt = new Date(now.getTime() - cooldownSeconds * 1000);
+  const [claim] = await transaction
+    .insert(communityContentCooldowns)
+    .values({ userId, action, lastActionAt: now })
+    .onConflictDoUpdate({
+      target: [
+        communityContentCooldowns.userId,
+        communityContentCooldowns.action,
+      ],
+      set: { lastActionAt: now },
+      where: lt(communityContentCooldowns.lastActionAt, nextAllowedAt),
+    })
+    .returning({ lastActionAt: communityContentCooldowns.lastActionAt });
+  if (claim) return null;
+
+  const [existing] = await transaction
+    .select({ lastActionAt: communityContentCooldowns.lastActionAt })
+    .from(communityContentCooldowns)
+    .where(
+      and(
+        eq(communityContentCooldowns.userId, userId),
+        eq(communityContentCooldowns.action, action),
+      ),
+    )
+    .limit(1);
+  if (!existing) {
+    throw new Error("Content cooldown state could not be loaded.");
+  }
+  return Math.max(
+    1,
+    Math.ceil(
+      (existing.lastActionAt.getTime() +
+        cooldownSeconds * 1000 -
+        now.getTime()) /
+        1000,
+    ),
+  );
+}
+
+function sendContentCooldown(
+  reply: FastifyReply,
+  action: "post" | "reply",
+  retryAfterSeconds: number,
+) {
+  const contentLabel = action === "post" ? "post" : "reply";
+  const pluralSuffix = retryAfterSeconds === 1 ? "" : "s";
+  return reply
+    .header("Retry-After", String(retryAfterSeconds))
+    .code(429)
+    .send({
+      error: {
+        code: "CONTENT_COOLDOWN",
+        message: `Please wait ${retryAfterSeconds} second${pluralSuffix} before creating another ${contentLabel}.`,
+        retryAfterSeconds,
+      },
+    });
 }
 
 type NotificationPreferenceName =
@@ -1228,7 +1311,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           if (report.targetType === "post") {
             const [removed] = await transaction
               .update(posts)
-              .set({ deletedAt, updatedAt: deletedAt })
+              .set({
+                deletedAt,
+                updatedAt: deletedAt,
+                deletedByModerator: true,
+              })
               .where(
                 and(eq(posts.id, report.targetId), isNull(posts.deletedAt)),
               )
@@ -1243,7 +1330,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           } else {
             const [removed] = await transaction
               .update(replies)
-              .set({ deletedAt, updatedAt: deletedAt })
+              .set({
+                deletedAt,
+                updatedAt: deletedAt,
+                deletedByModerator: true,
+              })
               .where(
                 and(eq(replies.id, report.targetId), isNull(replies.deletedAt)),
               )
@@ -3347,6 +3438,18 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           if (claim.kind !== "fresh")
             return { kind: "idempotency" as const, claim };
         }
+        const retryAfterSeconds = await claimContentCooldown(
+          transaction,
+          userId,
+          "post",
+          POST_CREATION_COOLDOWN_SECONDS,
+        );
+        if (retryAfterSeconds !== null) {
+          if (idempotency) {
+            await releaseIdempotencyClaim(transaction, idempotency);
+          }
+          return { kind: "cooldown" as const, retryAfterSeconds };
+        }
         const [post] = await transaction
           .insert(posts)
           .values({
@@ -3542,6 +3645,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       if (result.kind === "idempotency") {
         return sendIdempotencyClaim(reply, result.claim);
       }
+      if (result.kind === "cooldown") {
+        return sendContentCooldown(reply, "post", result.retryAfterSeconds);
+      }
       if (result.post && indexableCommunitySlug) {
         notifyIndexNow(
           [indexNowPageUrl(`/p/${encodeURIComponent(result.post.id)}`)],
@@ -3588,6 +3694,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           url: nextUrl,
           linkDomain: nextUrl ? new URL(nextUrl).hostname : null,
           updatedAt: new Date(),
+          moderatorEdited: post.authorId !== userId,
         })
         .where(and(eq(posts.id, post.id), isNull(posts.deletedAt)))
         .returning({
@@ -3649,7 +3756,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     const deleted = await database.transaction(async (transaction) => {
       const [removed] = await transaction
         .update(posts)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
+        .set({
+          deletedAt: new Date(),
+          updatedAt: new Date(),
+          deletedByModerator: post.authorId !== userId,
+        })
         .where(and(eq(posts.id, post.id), isNull(posts.deletedAt)))
         .returning({ id: posts.id });
       if (removed) {
@@ -3777,6 +3888,18 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           const claim = await claimIdempotency(transaction, idempotency);
           if (claim.kind !== "fresh")
             return { kind: "idempotency" as const, claim };
+        }
+        const retryAfterSeconds = await claimContentCooldown(
+          transaction,
+          userId,
+          "reply",
+          REPLY_CREATION_COOLDOWN_SECONDS,
+        );
+        if (retryAfterSeconds !== null) {
+          if (idempotency) {
+            await releaseIdempotencyClaim(transaction, idempotency);
+          }
+          return { kind: "cooldown" as const, retryAfterSeconds };
         }
         const [newReply] = await transaction
           .insert(replies)
@@ -3927,6 +4050,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       if (result.kind === "idempotency") {
         return sendIdempotencyClaim(reply, result.claim);
       }
+      if (result.kind === "cooldown") {
+        return sendContentCooldown(reply, "reply", result.retryAfterSeconds);
+      }
       if (result.reply && indexableCommunitySlug) {
         notifyIndexNow(
           [indexNowPageUrl(`/p/${encodeURIComponent(params.data.id)}`)],
@@ -3959,7 +4085,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     const [updated] = await database.transaction(async (transaction) => {
       const [result] = await transaction
         .update(replies)
-        .set({ body: body.data.body, updatedAt: new Date() })
+        .set({
+          body: body.data.body,
+          updatedAt: new Date(),
+          moderatorEdited: target.authorId !== userId,
+        })
         .where(and(eq(replies.id, target.id), isNull(replies.deletedAt)))
         .returning({
           id: replies.id,
@@ -4011,7 +4141,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     const [deleted] = await database.transaction(async (transaction) => {
       const [result] = await transaction
         .update(replies)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
+        .set({
+          deletedAt: new Date(),
+          updatedAt: new Date(),
+          deletedByModerator: target.authorId !== userId,
+        })
         .where(and(eq(replies.id, target.id), isNull(replies.deletedAt)))
         .returning({ id: replies.id });
       if (result) {

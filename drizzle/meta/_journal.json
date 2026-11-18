@@ -162,6 +162,20 @@
       "when": 1795007918030,
       "tag": "0022_last_jack_murdock",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1795014998360,
+      "tag": "0023_complete_ares",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1795015527499,
+      "tag": "0024_loving_screwball",
+      "breakpoints": true
     }
   ]
 }

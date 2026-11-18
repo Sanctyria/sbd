@@ -306,7 +306,11 @@ export const posts = pgTable(
     downvoteCount: integer("downvote_count").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
+    moderatorEdited: boolean("moderator_edited").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedByModerator: boolean("deleted_by_moderator")
+      .notNull()
+      .default(false),
   },
   (table) => [
     index("posts_feed_idx").on(table.communityId, table.createdAt, table.id),
@@ -332,7 +336,11 @@ export const replies = pgTable(
     voteCount: integer("vote_count").notNull().default(0),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
+    moderatorEdited: boolean("moderator_edited").notNull().default(false),
     deletedAt: timestamp("deleted_at", { withTimezone: true }),
+    deletedByModerator: boolean("deleted_by_moderator")
+      .notNull()
+      .default(false),
   },
   (table) => [
     index("replies_post_idx").on(table.postId, table.createdAt, table.id),
@@ -478,6 +486,20 @@ export const communityNotificationMutes = pgTable(
     primaryKey({ columns: [table.userId, table.communityId] }),
     index("community_notification_mutes_community_idx").on(table.communityId),
   ],
+);
+
+export const communityContentCooldowns = pgTable(
+  "community_content_cooldowns",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    action: text("action").$type<"post" | "reply">().notNull(),
+    lastActionAt: timestamp("last_action_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.action] })],
 );
 
 export const reports = pgTable(

@@ -159,6 +159,17 @@ type HotFeedCursor = {
   replyCount: number;
 };
 
+const moderatorSafePostFields = {
+  kind: posts.kind,
+  body: sql<string>`case when ${posts.deletedByModerator} then '' else ${posts.body} end`,
+  url: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.url} end`,
+  linkTitle: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkTitle} end`,
+  linkDescription: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkDescription} end`,
+  linkDomain: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkDomain} end`,
+  isModeratorEdited: posts.moderatorEdited,
+  isModeratorRemoved: posts.deletedByModerator,
+};
+
 function decodeHotFeedCursor(value?: string): HotFeedCursor | null | undefined {
   if (!value) return undefined;
   try {
@@ -1217,7 +1228,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     if (parsedQuery.data.type === "posts") {
       const conditions = [
         eq(posts.authorId, profile.userId),
-        isNull(posts.deletedAt),
+        or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
         isNull(users.deletedAt),
         eq(communities.isPublic, true),
         eq(communities.status, "active"),
@@ -1233,20 +1244,15 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       const results = await database
         .select({
           id: posts.id,
-          kind: posts.kind,
-          body: posts.body,
-          url: posts.url,
-          linkTitle: posts.linkTitle,
-          linkDescription: posts.linkDescription,
-          linkDomain: posts.linkDomain,
+          ...moderatorSafePostFields,
           voteCount: posts.voteCount,
           downvoteCount: posts.downvoteCount,
-          replyCount: sql<number>`(
+          replyCount: sql<number>`case when ${posts.deletedByModerator} then 0 else (
             select count(*)::int
             from ${replies}
             inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
             where ${replies.postId} = ${posts.id}
-              and ${replies.deletedAt} is null
+              and (${replies.deletedAt} is null or ${replies.deletedByModerator})
               and reply_author.deleted_at is null
               ${
                 viewerId
@@ -1257,7 +1263,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
                   )`
                   : sql``
               }
-          )`,
+          ) end`,
           isReacted: viewerId
             ? sql<boolean>`exists (
                 select 1 from ${postReactions}
@@ -1282,7 +1288,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
               )`
             : sql<boolean>`false`,
           canManage: viewerId
-            ? sql<boolean>`(
+            ? sql<boolean>`${posts.deletedAt} is null and (
                 ${posts.authorId} = ${viewerId}
                 or exists (
                   select 1 from ${communityMemberships} as post_manager
@@ -1631,7 +1637,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
 
     const conditions = [
       eq(bookmarks.userId, viewerId),
-      isNull(posts.deletedAt),
+      or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
       eq(communities.isPublic, true),
       eq(communities.status, "active"),
@@ -1656,20 +1662,15 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const rows = await database
       .select({
         id: posts.id,
-        kind: posts.kind,
-        body: posts.body,
-        url: posts.url,
-        linkTitle: posts.linkTitle,
-        linkDescription: posts.linkDescription,
-        linkDomain: posts.linkDomain,
+        ...moderatorSafePostFields,
         voteCount: posts.voteCount,
         downvoteCount: posts.downvoteCount,
-        replyCount: sql<number>`(
+        replyCount: sql<number>`case when ${posts.deletedByModerator} then 0 else (
           select count(*)::int
           from ${replies}
           inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
           where ${replies.postId} = ${posts.id}
-            and ${replies.deletedAt} is null
+            and (${replies.deletedAt} is null or ${replies.deletedByModerator})
             and reply_author.deleted_at is null
             ${
               viewerId
@@ -1680,7 +1681,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             )`
                 : sql``
             }
-        )`,
+        ) end`,
         isReacted: sql<boolean>`exists (
           select 1 from ${postReactions}
           where ${postReactions.postId} = ${posts.id}
@@ -1694,7 +1695,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             and ${postReactions.type} = 'downvote'
         )`,
         isBookmarked: sql<boolean>`true`,
-        canManage: sql<boolean>`(
+        canManage: sql<boolean>`${posts.deletedAt} is null and (
           ${posts.authorId} = ${viewerId}
           or exists (
             select 1 from ${communityMemberships} as post_manager
@@ -1760,7 +1761,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const conditions = [
       eq(communities.isPublic, true),
       eq(communities.status, "active"),
-      isNull(posts.deletedAt),
+      or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
     ];
     if (parsedQuery.data.community) {
@@ -1815,12 +1816,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     }
     let personalized = false;
     const viewerId = await currentViewerId(request);
-    const replyCountExpression = sql<number>`(
+    const replyCountExpression = sql<number>`case when ${posts.deletedByModerator} then 0 else (
       select count(*)::int
       from ${replies}
       inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
       where ${replies.postId} = ${posts.id}
-        and ${replies.deletedAt} is null
+        and (${replies.deletedAt} is null or ${replies.deletedByModerator})
         and reply_author.deleted_at is null
         ${
           viewerId
@@ -1831,7 +1832,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )`
             : sql``
         }
-    )`;
+    ) end`;
     if (viewerId) {
       conditions.push(
         sql`not exists (
@@ -1901,12 +1902,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const results = await database
       .select({
         id: posts.id,
-        kind: posts.kind,
-        body: posts.body,
-        url: posts.url,
-        linkTitle: posts.linkTitle,
-        linkDescription: posts.linkDescription,
-        linkDomain: posts.linkDomain,
+        ...moderatorSafePostFields,
         voteCount: posts.voteCount,
         downvoteCount: posts.downvoteCount,
         replyCount: replyCountExpression,
@@ -1920,7 +1916,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           ? sql<boolean>`exists (select 1 from ${bookmarks} where ${bookmarks.postId} = ${posts.id} and ${bookmarks.userId} = ${viewerId})`
           : sql<boolean>`false`,
         canManage: viewerId
-          ? sql<boolean>`(
+          ? sql<boolean>`${posts.deletedAt} is null and (
               ${posts.authorId} = ${viewerId}
               or exists (
                 select 1 from ${communityMemberships} as post_manager
@@ -2007,7 +2003,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       eq(posts.id, parsedParams.data.id),
       eq(communities.isPublic, true),
       eq(communities.status, "active"),
-      isNull(posts.deletedAt),
+      or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
     ];
     if (viewerId) {
@@ -2020,7 +2016,10 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     const [post] = await database
-      .select({ id: posts.id })
+      .select({
+        id: posts.id,
+        isModeratorRemoved: posts.deletedByModerator,
+      })
       .from(posts)
       .innerJoin(communities, eq(communities.id, posts.communityId))
       .innerJoin(users, eq(users.id, posts.authorId))
@@ -2031,6 +2030,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
     }
+    if (post.isModeratorRemoved) return { items: [], nextCursor: null };
 
     const conditions = [eq(replies.postId, post.id), isNull(users.deletedAt)];
     if (viewerId) {
@@ -2074,6 +2074,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           string | null
         >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isRemovedByModerator: replies.deletedByModerator,
+        isEditedByModerator: replies.moderatorEdited,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (
           select 1 from ${communityMemberships} as reply_owner
@@ -2148,7 +2150,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       eq(posts.id, parsedParams.data.id),
       eq(communities.isPublic, true),
       eq(communities.status, "active"),
-      isNull(posts.deletedAt),
+      or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
     ];
     if (viewerId) {
@@ -2164,20 +2166,15 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const [post] = await database
       .select({
         id: posts.id,
-        kind: posts.kind,
-        body: posts.body,
-        url: posts.url,
-        linkTitle: posts.linkTitle,
-        linkDescription: posts.linkDescription,
-        linkDomain: posts.linkDomain,
+        ...moderatorSafePostFields,
         voteCount: posts.voteCount,
         downvoteCount: posts.downvoteCount,
-        replyCount: sql<number>`(
+        replyCount: sql<number>`case when ${posts.deletedByModerator} then 0 else (
           select count(*)::int
           from ${replies}
           inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
           where ${replies.postId} = ${posts.id}
-            and ${replies.deletedAt} is null
+            and (${replies.deletedAt} is null or ${replies.deletedByModerator})
             and reply_author.deleted_at is null
             ${
               viewerId
@@ -2188,7 +2185,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             )`
                 : sql``
             }
-        )`,
+        ) end`,
         isReacted: viewerId
           ? sql<boolean>`exists (select 1 from ${postReactions} where ${postReactions.postId} = ${posts.id} and ${postReactions.userId} = ${viewerId} and ${postReactions.type} = 'like')`
           : sql<boolean>`false`,
@@ -2199,7 +2196,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           ? sql<boolean>`exists (select 1 from ${bookmarks} where ${bookmarks.postId} = ${posts.id} and ${bookmarks.userId} = ${viewerId})`
           : sql<boolean>`false`,
         canManage: viewerId
-          ? sql<boolean>`(
+          ? sql<boolean>`${posts.deletedAt} is null and (
               ${posts.authorId} = ${viewerId}
               or exists (
                 select 1 from ${communityMemberships} as post_manager
@@ -2247,8 +2244,10 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const indexable =
       authorIsActive && (await isCommunityIndexable(post.community.id));
 
-    const replyRows = await database
-      .select({
+    const replyRows = post.isModeratorRemoved
+      ? []
+      : await database
+          .select({
         id: replies.id,
         parentReplyId: replies.parentReplyId,
         reactionCount: replies.voteCount,
@@ -2268,6 +2267,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           string | null
         >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isRemovedByModerator: replies.deletedByModerator,
+        isEditedByModerator: replies.moderatorEdited,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
         isCommunityOwner: sql<boolean>`exists (
           select 1 from ${communityMemberships} as reply_owner
@@ -2311,28 +2312,28 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
               )
             )`
           : sql<boolean>`false`,
-      })
-      .from(replies)
-      .innerJoin(users, eq(replies.authorId, users.id))
-      .innerJoin(profiles, eq(users.id, profiles.userId))
-      .innerJoin(posts, eq(posts.id, replies.postId))
-      .where(
-        and(
-          eq(replies.postId, post.id),
-          isNull(users.deletedAt),
-          ...(viewerId
-            ? [
-                sql`not exists (
+          })
+          .from(replies)
+          .innerJoin(users, eq(replies.authorId, users.id))
+          .innerJoin(profiles, eq(users.id, profiles.userId))
+          .innerJoin(posts, eq(posts.id, replies.postId))
+          .where(
+            and(
+              eq(replies.postId, post.id),
+              isNull(users.deletedAt),
+              ...(viewerId
+                ? [
+                    sql`not exists (
                   select 1 from ${userBlocks}
                   where (${userBlocks.blockerId} = ${viewerId} and ${userBlocks.blockedId} = ${users.id})
                      or (${userBlocks.blockerId} = ${users.id} and ${userBlocks.blockedId} = ${viewerId})
                 )`,
-              ]
-            : []),
-        ),
-      )
-      .orderBy(desc(replies.createdAt), desc(replies.id))
-      .limit(51);
+                  ]
+                : []),
+            ),
+          )
+          .orderBy(desc(replies.createdAt), desc(replies.id))
+          .limit(51);
     const hasMoreReplies = replyRows.length > 50;
     const postReplies = hasMoreReplies ? replyRows.slice(0, 50) : replyRows;
     const oldestReply = postReplies.at(-1);
