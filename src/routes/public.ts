@@ -83,6 +83,8 @@ const feedQuerySchema = pageQuerySchema
     scope: z
       .enum(["following", "community", "profile", "public"])
       .default("public"),
+    sort: z.enum(["new", "hot"]).default("new"),
+    members: z.enum(["only"]).optional(),
     community: z
       .string()
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
@@ -108,6 +110,20 @@ const feedQuerySchema = pageQuerySchema
         message: "A username is required for the profile feed.",
       });
     }
+    if (query.scope !== "community" && query.sort === "hot") {
+      context.addIssue({
+        code: "custom",
+        path: ["sort"],
+        message: "Hot sorting is only available for community feeds.",
+      });
+    }
+    if (query.scope !== "community" && query.members) {
+      context.addIssue({
+        code: "custom",
+        path: ["members"],
+        message: "Member filtering is only available for community feeds.",
+      });
+    }
   });
 
 const slugParamsSchema = z.object({
@@ -127,6 +143,47 @@ const linkPreviewCache = new Map<
 const globalSearchQuerySchema = z.object({
   query: z.string().trim().min(2).max(100),
 });
+
+const hotFeedCursorSchema = z.object({
+  createdAt: z.string().datetime(),
+  id: z.string().uuid(),
+  voteCount: z.number().int(),
+  replyCount: z.number().int().nonnegative(),
+});
+
+type HotFeedCursor = {
+  createdAt: Date;
+  id: string;
+  voteCount: number;
+  replyCount: number;
+};
+
+function decodeHotFeedCursor(value?: string): HotFeedCursor | null | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = hotFeedCursorSchema.safeParse(
+      JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
+    );
+    if (!parsed.success) return null;
+    return {
+      createdAt: new Date(parsed.data.createdAt),
+      id: parsed.data.id,
+      voteCount: parsed.data.voteCount,
+      replyCount: parsed.data.replyCount,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function encodeHotFeedCursor(cursor: HotFeedCursor): string {
+  return Buffer.from(
+    JSON.stringify({
+      ...cursor,
+      createdAt: cursor.createdAt.toISOString(),
+    }),
+  ).toString("base64url");
+}
 
 function searchPattern(value: string): string {
   return `%${value.replace(/[\\%_]/g, "\\$&")}%`;
@@ -1426,6 +1483,29 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         entityId: notifications.entityId,
         payload: sql<Record<string, unknown>>`
           ${notifications.payload} || jsonb_strip_nulls(jsonb_build_object(
+            'viewerFollowsActor', (
+              select exists (
+                select 1
+                from ${userFollows} notification_follow
+                inner join ${profiles} notification_follow_actor
+                  on notification_follow_actor.user_id = notification_follow.followed_id
+                where notification_follow.follower_id = ${viewerId}
+                  and notification_follow_actor.username =
+                    ${notifications.payload}->>'actorUsername'
+              )
+            ),
+            'viewerPostVote', (
+              select case
+                when notification_vote.type = 'like' then 'up'
+                when notification_vote.type = 'downvote' then 'down'
+                else null
+              end
+              from ${postReactions} notification_vote
+              where notification_vote.user_id = ${viewerId}
+                and notification_vote.post_id = ${notifications.entityId}
+                and notification_vote.type in ('like', 'downvote')
+              limit 1
+            ),
             'actorAvatarUrl', (
               select notification_actor.avatar_url
               from profiles notification_actor
@@ -1668,9 +1748,6 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const parsedQuery = feedQuerySchema.safeParse(request.query);
     if (!parsedQuery.success) return invalidRequest(reply);
 
-    const cursor = decodeCursor(parsedQuery.data.cursor);
-    if (cursor === null) return invalidCursor(reply);
-
     const conditions = [
       eq(communities.isPublic, true),
       eq(communities.status, "active"),
@@ -1712,8 +1789,40 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )!,
       );
     }
+    if (parsedQuery.data.members === "only") {
+      conditions.push(
+        exists(
+          database
+            .select({ userId: communityMemberships.userId })
+            .from(communityMemberships)
+            .where(
+              and(
+                eq(communityMemberships.communityId, posts.communityId),
+                eq(communityMemberships.userId, posts.authorId),
+              ),
+            ),
+        ),
+      );
+    }
     let personalized = false;
     const viewerId = await currentViewerId(request);
+    const replyCountExpression = sql<number>`(
+      select count(*)::int
+      from ${replies}
+      inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
+      where ${replies.postId} = ${posts.id}
+        and ${replies.deletedAt} is null
+        and reply_author.deleted_at is null
+        ${
+          viewerId
+            ? sql`and not exists (
+          select 1 from ${userBlocks} as reply_block
+          where (reply_block.blocker_id = ${viewerId} and reply_block.blocked_id = reply_author.id)
+             or (reply_block.blocker_id = reply_author.id and reply_block.blocked_id = ${viewerId})
+        )`
+            : sql``
+        }
+    )`;
     if (viewerId) {
       conditions.push(
         sql`not exists (
@@ -1739,13 +1848,45 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       );
       personalized = true;
     }
+    const cursor =
+      parsedQuery.data.sort === "hot"
+        ? decodeHotFeedCursor(parsedQuery.data.cursor)
+        : decodeCursor(parsedQuery.data.cursor);
+    if (cursor === null) return invalidCursor(reply);
     if (cursor) {
-      conditions.push(
-        or(
-          lt(posts.createdAt, cursor.createdAt),
-          and(eq(posts.createdAt, cursor.createdAt), lt(posts.id, cursor.id)),
-        )!,
-      );
+      if (parsedQuery.data.sort === "hot") {
+        const hotCursor = cursor as HotFeedCursor;
+        conditions.push(
+          or(
+            lt(posts.voteCount, hotCursor.voteCount),
+            and(
+              eq(posts.voteCount, hotCursor.voteCount),
+              lt(replyCountExpression, hotCursor.replyCount),
+            ),
+            and(
+              eq(posts.voteCount, hotCursor.voteCount),
+              eq(replyCountExpression, hotCursor.replyCount),
+              lt(posts.createdAt, hotCursor.createdAt),
+            ),
+            and(
+              eq(posts.voteCount, hotCursor.voteCount),
+              eq(replyCountExpression, hotCursor.replyCount),
+              eq(posts.createdAt, hotCursor.createdAt),
+              lt(posts.id, hotCursor.id),
+            ),
+          )!,
+        );
+      } else {
+        conditions.push(
+          or(
+            lt(posts.createdAt, cursor.createdAt),
+            and(
+              eq(posts.createdAt, cursor.createdAt),
+              lt(posts.id, cursor.id),
+            ),
+          )!,
+        );
+      }
     }
 
     const results = await database
@@ -1759,23 +1900,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         linkDomain: posts.linkDomain,
         voteCount: posts.voteCount,
         downvoteCount: posts.downvoteCount,
-        replyCount: sql<number>`(
-          select count(*)::int
-          from ${replies}
-          inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
-          where ${replies.postId} = ${posts.id}
-            and ${replies.deletedAt} is null
-            and reply_author.deleted_at is null
-            ${
-              viewerId
-                ? sql`and not exists (
-              select 1 from ${userBlocks} as reply_block
-              where (reply_block.blocker_id = ${viewerId} and reply_block.blocked_id = reply_author.id)
-                 or (reply_block.blocker_id = reply_author.id and reply_block.blocked_id = ${viewerId})
-            )`
-                : sql``
-            }
-        )`,
+        replyCount: replyCountExpression,
         isReacted: viewerId
           ? sql<boolean>`exists (select 1 from ${postReactions} where ${postReactions.postId} = ${posts.id} and ${postReactions.userId} = ${viewerId} and ${postReactions.type} = 'like')`
           : sql<boolean>`false`,
@@ -1822,7 +1947,16 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(users, eq(posts.authorId, users.id))
       .innerJoin(profiles, eq(users.id, profiles.userId))
       .where(and(...conditions))
-      .orderBy(desc(posts.createdAt), desc(posts.id))
+      .orderBy(
+        ...(parsedQuery.data.sort === "hot"
+          ? [
+              desc(posts.voteCount),
+              desc(replyCountExpression),
+              desc(posts.createdAt),
+              desc(posts.id),
+            ]
+          : [desc(posts.createdAt), desc(posts.id)]),
+      )
       .limit(parsedQuery.data.limit + 1);
 
     const hasMore = results.length > parsedQuery.data.limit;
@@ -1837,7 +1971,17 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     return {
       items,
       personalized,
-      nextCursor: hasMore && lastItem ? encodeCursor(lastItem) : null,
+      nextCursor:
+        hasMore && lastItem
+          ? parsedQuery.data.sort === "hot"
+            ? encodeHotFeedCursor({
+                createdAt: lastItem.createdAt,
+                id: lastItem.id,
+                voteCount: lastItem.voteCount,
+                replyCount: Number(lastItem.replyCount),
+              })
+            : encodeCursor(lastItem)
+          : null,
     };
   });
 

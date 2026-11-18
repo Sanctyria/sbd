@@ -76,6 +76,26 @@ describe("community API", () => {
     expect(response.json().error.code).toBe("INVALID_CURSOR");
   });
 
+  it("validates community-only feed filters and hot-sort cursors", async () => {
+    const responses = await Promise.all([
+      app.inject({ method: "GET", url: "/api/v1/feed?sort=hot" }),
+      app.inject({ method: "GET", url: "/api/v1/feed?members=only" }),
+      app.inject({
+        method: "GET",
+        url: "/api/v1/feed?scope=community&community=worldbuilding&sort=hot&cursor=invalid",
+      }),
+    ]);
+
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      400, 400, 400,
+    ]);
+    expect(responses.map((response) => response.json().error.code)).toEqual([
+      "INVALID_REQUEST",
+      "INVALID_REQUEST",
+      "INVALID_CURSOR",
+    ]);
+  });
+
   it("rejects malformed post IDs before querying the database", async () => {
     const response = await app.inject({
       method: "GET",

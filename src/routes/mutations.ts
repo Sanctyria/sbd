@@ -3496,7 +3496,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                   entityId: params.data.id,
                   payload: {
                     targetKind,
-                    replyId: targetKind === "reply" ? newReply.id : undefined,
+                    replyId:
+                      targetKind === "reply"
+                        ? body.data.parentReplyId
+                        : undefined,
                     actorUsername: replyAuthor?.username ?? "member",
                     actorName: replyAuthor?.displayName ?? "A community member",
                     preview:
@@ -3741,7 +3744,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({
         error: {
           code: result.error,
-          message: "You cannot react to your own post.",
+          message: "You can't react to your own creation.",
         },
       });
     }
