@@ -76,6 +76,24 @@ describe("community API", () => {
     expect(response.json().error.code).toBe("INVALID_CURSOR");
   });
 
+  it("validates community member mention searches before querying the database", async () => {
+    const [invalidPrefix, invalidCursor] = await Promise.all([
+      app.inject({
+        method: "GET",
+        url: "/api/v1/communities/worldbuilding/members?usernamePrefix=bad%20name",
+      }),
+      app.inject({
+        method: "GET",
+        url: "/api/v1/communities/worldbuilding/members?usernamePrefix=mira&cursor=invalid",
+      }),
+    ]);
+
+    expect(invalidPrefix.statusCode).toBe(400);
+    expect(invalidPrefix.json().error.code).toBe("INVALID_REQUEST");
+    expect(invalidCursor.statusCode).toBe(400);
+    expect(invalidCursor.json().error.code).toBe("INVALID_CURSOR");
+  });
+
   it("validates community-only feed filters and hot-sort cursors", async () => {
     const responses = await Promise.all([
       app.inject({ method: "GET", url: "/api/v1/feed?sort=hot" }),

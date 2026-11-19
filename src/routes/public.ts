@@ -65,6 +65,10 @@ const communitiesQuerySchema = pageQuerySchema.extend({
   query: z.string().trim().max(100).optional(),
 });
 
+const communityMembersQuerySchema = pageQuerySchema.extend({
+  usernamePrefix: z.string().regex(/^[A-Za-z0-9_]{0,32}$/).optional(),
+});
+
 const profileActivityQuerySchema = pageQuerySchema.extend({
   type: z.enum(["posts", "replies"]).default("posts"),
 });
@@ -707,6 +711,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         slug: communities.slug,
         name: communities.name,
         avatarUrl: communities.avatarUrl,
+        bannerUrl: communities.bannerUrl,
+        creatorId: communities.creatorId,
         viewerRole: sql<string>`case
           when ${communities.creatorId} = ${viewerId} then 'owner'
           else ${communityMemberships.role}::text
@@ -723,9 +729,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
               'epoch'::timestamptz
             )
         )`.mapWith(Number),
-        memberCount: sql<number>`count(${communityMemberships.userId})`.mapWith(
-          Number,
-        ),
+        memberCount: sql<number>`(
+          select count(*)::int
+          from ${communityMemberships} as channel_member
+          where channel_member.community_id = ${communities.id}
+        )`.mapWith(Number),
         lastMessageBody: sql<string | null>`(
           select nullif(chat_message.body, '')
           from community_chat_messages as chat_message
@@ -774,13 +782,6 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           eq(communities.isPublic, true),
           eq(communities.status, "active"),
         ),
-      )
-      .groupBy(
-        communities.id,
-        communityMemberships.role,
-        communityMemberships.createdAt,
-        communityChatPreferences.notificationsEnabled,
-        communityChatPreferences.lastReadAt,
       )
       .orderBy(
         desc(
@@ -1050,7 +1051,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/api/v1/communities/:slug/members", async (request, reply) => {
     const parsedParams = slugParamsSchema.safeParse(request.params);
-    const parsedQuery = pageQuerySchema.safeParse(request.query);
+    const parsedQuery = communityMembersQuerySchema.safeParse(request.query);
     if (!parsedParams.success || !parsedQuery.success)
       return invalidRequest(reply);
     const cursor = decodeCursor(parsedQuery.data.cursor);
@@ -1097,6 +1098,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       eq(communityMemberships.communityId, community.id),
       isNull(users.deletedAt),
     ];
+    if (parsedQuery.data.usernamePrefix) {
+      conditions.push(
+        ilike(profiles.username, `${parsedQuery.data.usernamePrefix}%`),
+      );
+    }
     if (viewerId) {
       conditions.push(
         sql`not exists (

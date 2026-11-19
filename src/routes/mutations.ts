@@ -1096,7 +1096,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         folder = `sanctyria/communities/${community.id}/chat`;
         if (purpose === "chat-audio") {
           resourceType = "video";
-          allowedFormats = ["mp3", "wav", "aac", "m4a", "ogg", "flac"];
+          allowedFormats = ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"];
           maxBytes = 20 * 1024 * 1024;
         } else {
           resourceType = "image";
@@ -1135,7 +1135,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             : "image";
         allowedFormats =
           purpose === "post-audio"
-            ? ["mp3", "wav", "aac", "m4a", "ogg", "flac"]
+            ? ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"]
             : resourceType === "video"
               ? ["mp4", "mov"]
               : ["jpg", "jpeg", "png", "webp"];
