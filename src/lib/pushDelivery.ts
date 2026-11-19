@@ -153,6 +153,7 @@ export function makeMessage(delivery: ClaimedDelivery) {
     delivery.post_author_username ??
     optionalPayloadString(delivery.payload, "postAuthorUsername");
   const targetKind = optionalPayloadString(delivery.payload, "targetKind");
+  const mentionType = optionalPayloadString(delivery.payload, "mentionType");
   const postContext =
     targetKind === "reply"
       ? postAuthorName
@@ -179,7 +180,11 @@ export function makeMessage(delivery: ClaimedDelivery) {
           ? `${actorName} replied to your reply`
           : `${actorName} replied to your post`
         : delivery.notification_type === "mention"
-          ? `${actorName} mentioned you`
+          ? action === "chat_message"
+            ? mentionType === "everyone"
+              ? `${actorName} notified everyone`
+              : `${actorName} mentioned you`
+            : `${actorName} mentioned you`
           : delivery.notification_type === "reaction"
             ? `${actorName} liked your post`
               : delivery.notification_type === "post"
@@ -216,6 +221,10 @@ export function makeMessage(delivery: ClaimedDelivery) {
   const deepLink =
     delivery.notification_type === "community" && communitySlug
       ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
+      : delivery.notification_type === "mention" &&
+          action === "chat_message" &&
+          communitySlug
+        ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
       : delivery.notification_type === "system" && actorUsername
         ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
         : delivery.entity_id

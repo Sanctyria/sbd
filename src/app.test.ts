@@ -121,10 +121,19 @@ describe("community API", () => {
         url: "/api/v1/communities/worldbuilding/chat/messages",
         payload: { body: "Hello" },
       }),
+      app.inject({
+        method: "PATCH",
+        url: "/api/v1/communities/worldbuilding/chat/notifications",
+        payload: { chatNotificationsEnabled: false },
+      }),
+      app.inject({
+        method: "DELETE",
+        url: "/api/v1/communities/worldbuilding/chat/messages/00000000-0000-4000-8000-000000000000",
+      }),
     ]);
 
     expect(responses.map((response) => response.statusCode)).toEqual([
-      401, 401, 400, 401,
+      401, 401, 400, 401, 401, 401,
     ]);
     expect(responses[2].json().error.code).toBe("INVALID_CURSOR");
   });
@@ -249,14 +258,23 @@ describe("community API", () => {
         url: "/api/v1/me/push-device",
         payload: { token: "device-token", platform: "android" },
       }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/uploads/signature",
+        payload: {
+          purpose: "chat-audio",
+          communitySlug: "worldbuilding",
+        },
+      }),
       app.inject({ method: "DELETE", url: "/api/v1/me/push-device" }),
     ]);
 
     expect(responses.map((response) => response.statusCode)).toEqual([
-      400, 401, 401,
+      400, 401, 401, 401,
     ]);
     expect(responses.map((response) => response.json().error.code)).toEqual([
       "INVALID_REQUEST",
+      "UNAUTHENTICATED",
       "UNAUTHENTICATED",
       "UNAUTHENTICATED",
     ]);

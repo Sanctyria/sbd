@@ -152,4 +152,27 @@ describe("push delivery message", () => {
       imageUrl: "https://cdn.example.test/post.png",
     });
   });
+
+  it("uses a community deep link and distinct copy for @everyone chat alerts", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "mention",
+      entity_id: "chat-message-id",
+      payload: {
+        action: "chat_message",
+        mentionType: "everyone",
+        actorName: "Mira Voss",
+        communitySlug: "worldbuilding",
+      },
+      attempts: 0,
+    });
+
+    expect(message.data).toMatchObject({
+      title: "Mira Voss notified everyone",
+      deepLink: "https://sanctyria.com/r/worldbuilding",
+    });
+  });
 });

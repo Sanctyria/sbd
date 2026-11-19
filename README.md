@@ -6,13 +6,14 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 
 - Account signup/login, HTTP-only sessions, and profile management, including HTTPS avatar and banner image URLs.
 - Public communities, membership, posts, nested replies, reactions, votes, bookmarks, and notifications.
+- Community chat with owner-only `@everyone`, mention notifications, per-community notification preferences, and unread counts.
 - Community-owner moderation and global Core administration with audited actions.
 - Journal CMS, community announcement banners, and aggregated analytics.
 - Audited search-index approvals for communities and explicit profile indexing opt-in.
 - Cursor-paginated APIs and server-sent community events.
 - Optional Firebase Cloud Messaging delivery for registered Android and iOS devices.
 - HTTPS link metadata previews with guarded public-host fetching.
-- Signed Cloudinary uploads for profile, community, post, and reply media.
+- Signed Cloudinary uploads for profile, community, post, reply, and chat media.
 - Cloudflare Turnstile verification and shared PostgreSQL auth-attempt limits.
 - One-time Stripe and PayPal checkout, with verified, idempotent payment webhooks.
 
@@ -120,6 +121,7 @@ When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with 
 - `/donate` presents the refund policy and only enables methods configured on the backend. Donations are generally non-refundable, subject to applicable law and payment-provider rules; accidental/unauthorized payment queries should be handled through the support channel.
 - Native push is optional. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply migrations `0019_silly_stryfe.sql`, `0020_fair_lady_mastermind.sql`, and `0021_cold_stranger.sql` before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
 - Mobile uploads use signed Cloudinary requests. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend environment/secret manager. The API secret must never be added to Flutter build defines or client configuration. The app enforces 10 MB images and 50 MB videos (up to 3 minutes); also set appropriate upload limits in the Cloudinary account.
+- Post audio and chat audio use upload purposes `post-audio` and `chat-audio`; they are signed as Cloudinary `video` resources, restricted to MP3, WAV, AAC, M4A, OGG, and FLAC, with a 20 MB limit. Chat authors include their `role` (`owner`, `moderator`, or `member`); `/api/v1/me/chats` includes `viewerRole`, `chatNotificationsEnabled`, and `unreadCount`. Reading a chat message page records its read time. Update per-community notification settings with `PATCH /api/v1/communities/:slug/chat/notifications` and `{ "chatNotificationsEnabled": false }`. Only a community creator or `owner` role can send `@everyone`; moderators cannot.
 
 ## Commands
 

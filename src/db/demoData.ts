@@ -25,7 +25,7 @@ export interface DemoPost {
   id: string;
   author: string;
   community: string;
-  kind: "text" | "link" | "image_url" | "video_url";
+  kind: "text" | "link" | "image_url" | "video_url" | "audio_url";
   body: string;
   url?: string;
   linkTitle?: string;

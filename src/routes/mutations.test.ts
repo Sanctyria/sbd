@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  communityChatNotificationSchema,
   createChatMessageSchema,
   postBodySchema,
+  uploadSignatureSchema,
 } from "./mutations.js";
 
 describe("community mutation request schemas", () => {
@@ -37,6 +39,12 @@ describe("community mutation request schemas", () => {
         body: "A community video",
         url: "https://cdn.example.test/video.mp4",
       },
+      {
+        community: "worldbuilding",
+        kind: "audio_url",
+        body: "A community audio clip",
+        url: "https://res.cloudinary.com/demo/video/upload/audio.m4a",
+      },
     ]) {
       expect(postBodySchema.safeParse(post).success).toBe(true);
     }
@@ -52,5 +60,50 @@ describe("community mutation request schemas", () => {
         mediaUrl: "https://cdn.example.test/photo.jpg",
       }).success,
     ).toBe(true);
+  });
+
+  it("requires a media URL for explicitly typed chat audio", () => {
+    expect(
+      createChatMessageSchema.safeParse({
+        body: "",
+        mediaKind: "audio_url",
+      }).success,
+    ).toBe(false);
+    expect(
+      createChatMessageSchema.safeParse({
+        body: "",
+        mediaKind: "audio_url",
+        mediaUrl: "https://res.cloudinary.com/demo/video/upload/audio.m4a",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts audio upload purposes only with a community", () => {
+    expect(
+      uploadSignatureSchema.safeParse({
+        purpose: "post-audio",
+        communitySlug: "worldbuilding",
+      }).success,
+    ).toBe(true);
+    expect(
+      uploadSignatureSchema.safeParse({ purpose: "chat-audio" }).success,
+    ).toBe(false);
+    expect(
+      uploadSignatureSchema.safeParse({
+        purpose: "chat-audio",
+        communitySlug: "worldbuilding",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("validates per-community chat notification settings", () => {
+    expect(
+      communityChatNotificationSchema.safeParse({
+        chatNotificationsEnabled: false,
+      }).success,
+    ).toBe(true);
+    expect(
+      communityChatNotificationSchema.safeParse({ enabled: false }).success,
+    ).toBe(false);
   });
 });

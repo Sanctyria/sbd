@@ -26,6 +26,7 @@ import {
   bookmarks,
   communityBanners,
   communityChatMessages,
+  communityChatPreferences,
   communities,
   communitySlugAliases,
   communityMemberships,
@@ -706,6 +707,22 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         slug: communities.slug,
         name: communities.name,
         avatarUrl: communities.avatarUrl,
+        viewerRole: sql<string>`case
+          when ${communities.creatorId} = ${viewerId} then 'owner'
+          else ${communityMemberships.role}::text
+        end`,
+        chatNotificationsEnabled: sql<boolean>`coalesce(${communityChatPreferences.notificationsEnabled}, true)`,
+        unreadCount: sql<number>`(
+          select count(*)::int
+          from ${communityChatMessages} as unread_message
+          where unread_message.community_id = ${communities.id}
+            and unread_message.author_id <> ${viewerId}
+            and unread_message.created_at > coalesce(
+              ${communityChatPreferences.lastReadAt},
+            ${communityMemberships.createdAt},
+              'epoch'::timestamptz
+            )
+        )`.mapWith(Number),
         memberCount: sql<number>`count(${communityMemberships.userId})`.mapWith(
           Number,
         ),
@@ -718,6 +735,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )`,
         lastMessageMediaUrl: sql<string | null>`(
           select chat_message.media_url
+          from community_chat_messages as chat_message
+          where chat_message.community_id = ${communities.id}
+          order by chat_message.created_at desc, chat_message.id desc
+          limit 1
+        )`,
+        lastMessageMediaKind: sql<string | null>`(
+          select chat_message.media_kind
           from community_chat_messages as chat_message
           where chat_message.community_id = ${communities.id}
           order by chat_message.created_at desc, chat_message.id desc
@@ -736,6 +760,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         communities,
         eq(communities.id, communityMemberships.communityId),
       )
+      .leftJoin(
+        communityChatPreferences,
+        and(
+          eq(communityChatPreferences.userId, viewerId),
+          eq(communityChatPreferences.communityId, communities.id),
+        ),
+      )
       .where(
         and(
           eq(communityMemberships.userId, viewerId),
@@ -744,7 +775,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           eq(communities.status, "active"),
         ),
       )
-      .groupBy(communities.id)
+      .groupBy(
+        communities.id,
+        communityMemberships.role,
+        communityMemberships.createdAt,
+        communityChatPreferences.notificationsEnabled,
+        communityChatPreferences.lastReadAt,
+      )
       .orderBy(
         desc(
           sql<Date | null>`(
@@ -780,6 +817,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         .select({
           id: communities.id,
           chatEnabled: communities.chatEnabled,
+          creatorId: communities.creatorId,
         })
         .from(communities)
         .where(
@@ -825,6 +863,24 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      await database
+        .insert(communityChatPreferences)
+        .values({
+          userId: viewerId,
+          communityId: community.id,
+          lastReadAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: [
+            communityChatPreferences.userId,
+            communityChatPreferences.communityId,
+          ],
+          set: {
+            lastReadAt: sql`greatest(${communityChatPreferences.lastReadAt}, excluded.last_read_at)`,
+            updatedAt: new Date(),
+          },
+        });
+
       const conditions = [eq(communityChatMessages.communityId, community.id)];
       if (cursor) {
         conditions.push(
@@ -842,6 +898,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           id: communityChatMessages.id,
           body: communityChatMessages.body,
           mediaUrl: communityChatMessages.mediaUrl,
+          mediaKind: communityChatMessages.mediaKind,
           createdAt: communityChatMessages.createdAt,
           author: {
             id: users.id,
@@ -852,11 +909,26 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             initials: profiles.initials,
             avatarColor: profiles.avatarColor,
             verified: profiles.isVerified,
+            role: sql<string>`case
+              when ${communities.creatorId} = ${users.id} then 'owner'
+              else coalesce(${communityMemberships.role}::text, 'member')
+            end`,
           },
         })
         .from(communityChatMessages)
         .innerJoin(users, eq(users.id, communityChatMessages.authorId))
         .innerJoin(profiles, eq(profiles.userId, users.id))
+        .innerJoin(
+          communities,
+          eq(communities.id, communityChatMessages.communityId),
+        )
+        .leftJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.userId, users.id),
+            eq(communityMemberships.communityId, community.id),
+          ),
+        )
         .where(and(...conditions, isNull(users.deletedAt)))
         .orderBy(
           desc(communityChatMessages.createdAt),

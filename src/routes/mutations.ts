@@ -22,6 +22,7 @@ import {
   cloudinarySignature,
   destroyCloudinaryAsset,
   isCloudinaryConfigured,
+  cloudinaryPublicIdFromUrl,
 } from "../lib/cloudinary.js";
 import {
   recordEmberScoreChange,
@@ -29,6 +30,11 @@ import {
   recordReplyEmberRemoval,
 } from "../lib/ember.js";
 import { indexNowPageUrl, notifyIndexNow } from "../lib/indexNow.js";
+import {
+  canUseEveryoneMention,
+  chatAuthorRole,
+  containsEveryoneMention,
+} from "../lib/chatSemantics.js";
 import { extractMentionUsernames } from "../lib/mentions.js";
 import {
   getIndexableCommunitySlug,
@@ -38,6 +44,7 @@ import {
   bookmarks,
   communities,
   communityChatMessages,
+  communityChatPreferences,
   communityContentCooldowns,
   communitySlugAliases,
   communityMemberships,
@@ -116,10 +123,33 @@ const communityImageSchema = z.union([
   httpsUrlSchema,
   inlineCommunityImageSchema,
 ]);
+
+function isAudioUploadFromExpectedCloudinaryFolder(
+  value: string | null | undefined,
+  expectedFolder: string,
+): boolean {
+  if (!value || !environment.CLOUDINARY_CLOUD_NAME) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const format = url.pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  return (
+    ["mp3", "wav", "aac", "m4a", "ogg", "flac"].includes(format ?? "") &&
+    cloudinaryPublicIdFromUrl(
+      value,
+      environment.CLOUDINARY_CLOUD_NAME,
+      expectedFolder,
+    )?.resourceType === "video"
+  );
+}
+
 export const postBodySchema = z
   .object({
     community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-    kind: z.enum(["text", "link", "image_url", "video_url"]),
+    kind: z.enum(["text", "link", "image_url", "video_url", "audio_url"]),
     body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
     url: httpsUrlSchema.nullable().optional(),
   })
@@ -180,8 +210,13 @@ export const createChatMessageSchema = z
   .object({
     body: z.string().trim().max(1000).default(""),
     mediaUrl: httpsUrlSchema.optional(),
+    mediaKind: z.enum(["image_url", "audio_url"]).optional(),
   })
-  .refine((value) => Boolean(value.body || value.mediaUrl));
+  .refine(
+    (value) =>
+      Boolean(value.body || value.mediaUrl) &&
+      (!value.mediaKind || Boolean(value.mediaUrl)),
+  );
 const notificationReadSchema = z.object({ read: z.literal(true) });
 const notificationSettingsSchema = z
   .object({
@@ -195,6 +230,9 @@ const notificationSettingsSchema = z
   })
   .strict();
 const communityNotificationMuteSchema = z.object({ muted: z.boolean() });
+export const communityChatNotificationSchema = z
+  .object({ chatNotificationsEnabled: z.boolean() })
+  .strict();
 const moderationQueueQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
@@ -297,7 +335,7 @@ async function cleanupPostCloudinaryAssets(
     );
   }
 }
-const uploadSignatureSchema = z
+export const uploadSignatureSchema = z
   .object({
     purpose: z.enum([
       "profile-avatar",
@@ -306,8 +344,10 @@ const uploadSignatureSchema = z
       "community-banner",
       "post-image",
       "post-video",
+      "post-audio",
       "reply-attachment",
       "chat-image",
+      "chat-audio",
     ]),
     communitySlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
     postId: z.string().uuid().optional(),
@@ -317,7 +357,8 @@ const uploadSignatureSchema = z
     const needsCommunity =
       value.purpose.startsWith("community-") ||
       value.purpose.startsWith("post-") ||
-      value.purpose === "chat-image";
+      value.purpose === "chat-image" ||
+      value.purpose === "chat-audio";
     if (needsCommunity !== Boolean(value.communitySlug)) {
       context.addIssue({
         code: "custom",
@@ -1003,7 +1044,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         resourceType = "image";
         allowedFormats = ["jpg", "jpeg", "png", "webp"];
         maxBytes = 10 * 1024 * 1024;
-      } else if (purpose === "chat-image") {
+      } else if (purpose === "chat-image" || purpose === "chat-audio") {
         const [community] = await database
           .select({
             id: communities.id,
@@ -1028,14 +1069,40 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(403).send({
             error: {
               code: "COMMUNITY_CHAT_UNAVAILABLE",
-              message: "Join a community with chat enabled to upload images.",
+              message: "Join a community with chat enabled to upload media.",
             },
           });
         }
+        if (purpose === "chat-audio") {
+          const [memberMute] = await database
+            .select({ userId: communityMemberMutes.userId })
+            .from(communityMemberMutes)
+            .where(
+              and(
+                eq(communityMemberMutes.communityId, community.id),
+                eq(communityMemberMutes.userId, userId),
+              ),
+            )
+            .limit(1);
+          if (memberMute) {
+            return reply.code(403).send({
+              error: {
+                code: "COMMUNITY_MEMBER_MUTED",
+                message: "You cannot upload chat audio while muted.",
+              },
+            });
+          }
+        }
         folder = `sanctyria/communities/${community.id}/chat`;
-        resourceType = "image";
-        allowedFormats = ["jpg", "jpeg", "png", "webp"];
-        maxBytes = 10 * 1024 * 1024;
+        if (purpose === "chat-audio") {
+          resourceType = "video";
+          allowedFormats = ["mp3", "wav", "aac", "m4a", "ogg", "flac"];
+          maxBytes = 20 * 1024 * 1024;
+        } else {
+          resourceType = "image";
+          allowedFormats = ["jpg", "jpeg", "png", "webp"];
+          maxBytes = 10 * 1024 * 1024;
+        }
       } else if (purpose.startsWith("post-")) {
         const [community] = await database
           .select({ id: communities.id })
@@ -1062,13 +1129,22 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         folder = `sanctyria/users/${userId}/posts/${community.id}`;
-        resourceType = purpose === "post-video" ? "video" : "image";
+        resourceType =
+          purpose === "post-video" || purpose === "post-audio"
+            ? "video"
+            : "image";
         allowedFormats =
-          resourceType === "video"
-            ? ["mp4", "mov"]
-            : ["jpg", "jpeg", "png", "webp"];
+          purpose === "post-audio"
+            ? ["mp3", "wav", "aac", "m4a", "ogg", "flac"]
+            : resourceType === "video"
+              ? ["mp4", "mov"]
+              : ["jpg", "jpeg", "png", "webp"];
         maxBytes =
-          resourceType === "video" ? 50 * 1024 * 1024 : 10 * 1024 * 1024;
+          purpose === "post-audio"
+            ? 20 * 1024 * 1024
+            : resourceType === "video"
+              ? 50 * 1024 * 1024
+              : 10 * 1024 * 1024;
       } else {
         const postId = body.data.postId!;
         const communityId = await activePostCommunityId(postId);
@@ -3397,6 +3473,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .select({
           id: communities.id,
           chatEnabled: communities.chatEnabled,
+          creatorId: communities.creatorId,
+          slug: communities.slug,
         })
         .from(communities)
         .where(
@@ -3424,7 +3502,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       const [membership] = await database
-        .select({ userId: communityMemberships.userId })
+        .select({
+          userId: communityMemberships.userId,
+          role: communityMemberships.role,
+        })
         .from(communityMemberships)
         .where(
           and(
@@ -3490,6 +3571,40 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
+      const everyoneMention = containsEveryoneMention(body.data.body);
+      if (
+        everyoneMention &&
+        !canUseEveryoneMention({
+          userId,
+          creatorId: community.creatorId,
+          role: membership.role,
+        })
+      ) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_OWNER_REQUIRED",
+            message: "Only community owners can notify everyone in chat.",
+          },
+        });
+      }
+      if (
+        body.data.mediaKind === "audio_url" &&
+        !isAudioUploadFromExpectedCloudinaryFolder(
+          body.data.mediaUrl,
+          `sanctyria/communities/${community.id}/chat`,
+        )
+      ) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_CHAT_AUDIO",
+            message: "Chat audio must be uploaded through the signed audio upload flow.",
+          },
+        });
+      }
+
+      const mentionedUsernames = extractMentionUsernames(body.data.body).filter(
+        (username) => username !== "everyone",
+      );
       const [message] = await database.transaction(async (transaction) => {
         const [createdMessage] = await transaction
           .insert(communityChatMessages)
@@ -3498,6 +3613,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             authorId: userId,
             body: body.data.body,
             mediaUrl: body.data.mediaUrl ?? null,
+            mediaKind:
+              body.data.mediaKind ??
+              (body.data.mediaUrl ? "image_url" : null),
           })
           .returning();
         if (createdMessage) {
@@ -3507,14 +3625,244 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             entityId: createdMessage.id,
             payload: { messageId: createdMessage.id },
           });
+
+          if (everyoneMention || mentionedUsernames.length > 0) {
+            const mentionedRecipients = await transaction
+              .select({ userId: communityMemberships.userId })
+              .from(communityMemberships)
+              .innerJoin(users, eq(users.id, communityMemberships.userId))
+              .innerJoin(profiles, eq(profiles.userId, users.id))
+              .leftJoin(
+                notificationPreferences,
+                eq(notificationPreferences.userId, users.id),
+              )
+              .leftJoin(
+                communityChatPreferences,
+                and(
+                  eq(communityChatPreferences.userId, users.id),
+                  eq(communityChatPreferences.communityId, community.id),
+                ),
+              )
+              .leftJoin(
+                communityNotificationMutes,
+                and(
+                  eq(communityNotificationMutes.userId, users.id),
+                  eq(communityNotificationMutes.communityId, community.id),
+                ),
+              )
+              .where(
+                and(
+                  eq(communityMemberships.communityId, community.id),
+                  ne(communityMemberships.userId, userId),
+                  isNull(users.deletedAt),
+                  isNull(users.suspendedAt),
+                  isNull(communityNotificationMutes.userId),
+                  sql`coalesce(${notificationPreferences.mentions}, true)`,
+                  sql`coalesce(${communityChatPreferences.notificationsEnabled}, true)`,
+                  everyoneMention
+                    ? undefined
+                    : inArray(profiles.username, mentionedUsernames),
+                ),
+              );
+            if (mentionedRecipients.length) {
+              const createdNotifications = await transaction
+                .insert(notifications)
+                .values(
+                  mentionedRecipients.map(({ userId: recipientId }) => ({
+                    recipientId,
+                    type: "mention" as const,
+                    entityId: createdMessage.id,
+                    payload: {
+                      action: "chat_message",
+                      actorUsername: author.username,
+                      actorName: author.displayName,
+                      preview: body.data.body.slice(0, 180),
+                      communitySlug: community.slug,
+                      ...(everyoneMention ? { mentionType: "everyone" } : {}),
+                    },
+                  })),
+                )
+                .returning({
+                  id: notifications.id,
+                  recipientId: notifications.recipientId,
+                });
+              await transaction.insert(outboxEvents).values(
+                createdNotifications.map((notification) => ({
+                  topic: "notification.created",
+                  recipientId: notification.recipientId,
+                  entityId: notification.id,
+                  payload: { notificationId: notification.id },
+                })),
+              );
+            }
+          }
         }
         return [createdMessage];
       });
       if (!message) throw new Error("Chat message could not be created.");
       reply.header("cache-control", "no-store");
       return reply.code(201).send({
-        message: { ...message, author },
+        message: {
+          ...message,
+          author: {
+            ...author,
+            role: chatAuthorRole({
+              userId,
+              creatorId: community.creatorId,
+              role: membership.role,
+            }),
+          },
+        },
       });
+    },
+  );
+
+  app.patch(
+    "/api/v1/communities/:slug/chat/notifications",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = slugParamsSchema.safeParse(request.params);
+      const body = communityChatNotificationSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+
+      const [community] = await database
+        .select({ id: communities.id })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+            eq(communities.chatEnabled, true),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
+        });
+      }
+      const [membership] = await database
+        .select({ userId: communityMemberships.userId })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, community.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (!membership) {
+        return reply.code(403).send({
+          error: {
+            code: "MEMBERSHIP_REQUIRED",
+            message: "Join this community to change its chat settings.",
+          },
+        });
+      }
+
+      await database
+        .insert(communityChatPreferences)
+        .values({
+          userId,
+          communityId: community.id,
+          notificationsEnabled: body.data.chatNotificationsEnabled,
+        })
+        .onConflictDoUpdate({
+          target: [
+            communityChatPreferences.userId,
+            communityChatPreferences.communityId,
+          ],
+          set: {
+            notificationsEnabled: body.data.chatNotificationsEnabled,
+            updatedAt: new Date(),
+          },
+        });
+      reply.header("cache-control", "private, no-store");
+      return {
+        chatNotificationsEnabled: body.data.chatNotificationsEnabled,
+      };
+    },
+  );
+
+  app.delete(
+    "/api/v1/communities/:slug/chat/messages/:id",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ ...slugParamsSchema.shape, id: z.string().uuid() })
+        .safeParse(request.params);
+      if (!params.success) return invalidRequest(reply);
+
+      const [community] = await database
+        .select({ id: communities.id, creatorId: communities.creatorId })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
+        });
+      }
+      const [membership] = await database
+        .select({ role: communityMemberships.role })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, community.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (
+        !canUseEveryoneMention({
+          userId,
+          creatorId: community.creatorId,
+          role: membership?.role ?? "member",
+        }) &&
+        membership?.role !== "moderator"
+      ) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_MODERATOR_REQUIRED",
+            message: "Community owner or moderator access is required.",
+          },
+        });
+      }
+      const [deleted] = await database
+        .delete(communityChatMessages)
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communityChatMessages.communityId, community.id),
+          ),
+        )
+        .returning({ id: communityChatMessages.id });
+      if (!deleted) {
+        return reply.code(404).send({
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
+        });
+      }
+      return reply.code(204).send();
     },
   );
 
@@ -3596,6 +3944,20 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           error: {
             code: "COMMUNITY_MEMBER_MUTED",
             message: "You are muted in this community and cannot create posts.",
+          },
+        });
+      }
+      if (
+        body.data.kind === "audio_url" &&
+        !isAudioUploadFromExpectedCloudinaryFolder(
+          body.data.url,
+          `sanctyria/users/${userId}/posts/${community.id}`,
+        )
+      ) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_POST_AUDIO",
+            message: "Post audio must be uploaded through the signed audio upload flow.",
           },
         });
       }
@@ -3741,7 +4103,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                       postUrl: url ?? "",
                       mediaUrl:
                         body.data.kind === "image_url" ||
-                            body.data.kind === "video_url"
+                            body.data.kind === "video_url" ||
+                            body.data.kind === "audio_url"
                           ? url ?? ""
                           : "",
                       mediaKind: body.data.kind,

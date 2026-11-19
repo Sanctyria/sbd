@@ -33,6 +33,7 @@ export const postKindEnum = pgEnum("post_kind", [
   "link",
   "image_url",
   "video_url",
+  "audio_url",
 ]);
 export const notificationTypeEnum = pgEnum("notification_type", [
   "reply",
@@ -299,6 +300,7 @@ export const communityChatMessages = pgTable(
       .references(() => users.id, { onDelete: "cascade" }),
     body: text("body").notNull().default(""),
     mediaUrl: text("media_url"),
+    mediaKind: text("media_kind"),
     createdAt: createdAt(),
   },
   (table) => [
@@ -311,6 +313,29 @@ export const communityChatMessages = pgTable(
       table.authorId,
       table.createdAt,
     ),
+  ],
+);
+
+export const communityChatPreferences = pgTable(
+  "community_chat_preferences",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id, { onDelete: "cascade" }),
+    notificationsEnabled: boolean("notifications_enabled")
+      .notNull()
+      .default(true),
+    lastReadAt: timestamp("last_read_at", { withTimezone: true })
+      .notNull()
+      .default(new Date(0)),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.communityId] }),
+    index("community_chat_preferences_community_idx").on(table.communityId),
   ],
 );
 
