@@ -25,6 +25,7 @@ import {
 import {
   bookmarks,
   communityBanners,
+  communityChatMessages,
   communities,
   communitySlugAliases,
   communityMemberships,
@@ -580,6 +581,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         communities.avatarUrl,
         communities.bannerUrl,
         communities.websiteUrl,
+        communities.chatEnabled,
         communities.createdAt,
       )
       .orderBy(desc(communities.createdAt), desc(communities.id))
@@ -613,6 +615,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         avatarUrl: communities.avatarUrl,
         bannerUrl: communities.bannerUrl,
         websiteUrl: communities.websiteUrl,
+        chatEnabled: communities.chatEnabled,
         createdAt: communities.createdAt,
         updatedAt: communities.updatedAt,
         memberCount: viewerId
@@ -688,6 +691,196 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     );
     return { community: { ...community, indexable } };
   });
+
+  app.get("/api/v1/me/chats", async (request, reply) => {
+    const viewerId = await currentViewerId(request);
+    if (!viewerId) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+
+    const items = await database
+      .select({
+        id: communities.id,
+        slug: communities.slug,
+        name: communities.name,
+        avatarUrl: communities.avatarUrl,
+        memberCount: sql<number>`count(${communityMemberships.userId})`.mapWith(
+          Number,
+        ),
+        lastMessageBody: sql<string | null>`(
+          select nullif(chat_message.body, '')
+          from community_chat_messages as chat_message
+          where chat_message.community_id = ${communities.id}
+          order by chat_message.created_at desc, chat_message.id desc
+          limit 1
+        )`,
+        lastMessageMediaUrl: sql<string | null>`(
+          select chat_message.media_url
+          from community_chat_messages as chat_message
+          where chat_message.community_id = ${communities.id}
+          order by chat_message.created_at desc, chat_message.id desc
+          limit 1
+        )`,
+        lastMessageAt: sql<Date | null>`(
+          select chat_message.created_at
+          from community_chat_messages as chat_message
+          where chat_message.community_id = ${communities.id}
+          order by chat_message.created_at desc, chat_message.id desc
+          limit 1
+        )`,
+      })
+      .from(communityMemberships)
+      .innerJoin(
+        communities,
+        eq(communities.id, communityMemberships.communityId),
+      )
+      .where(
+        and(
+          eq(communityMemberships.userId, viewerId),
+          eq(communities.chatEnabled, true),
+          eq(communities.isPublic, true),
+          eq(communities.status, "active"),
+        ),
+      )
+      .groupBy(communities.id)
+      .orderBy(
+        desc(
+          sql<Date | null>`(
+            select chat_message.created_at
+            from community_chat_messages as chat_message
+            where chat_message.community_id = ${communities.id}
+            order by chat_message.created_at desc, chat_message.id desc
+            limit 1
+          )`,
+        ),
+        desc(communities.updatedAt),
+      );
+    reply.header("cache-control", "private, no-store");
+    return { items };
+  });
+
+  app.get(
+    "/api/v1/communities/:slug/chat/messages",
+    async (request, reply) => {
+      const params = slugParamsSchema.safeParse(request.params);
+      const parsedQuery = pageQuerySchema.safeParse(request.query);
+      if (!params.success || !parsedQuery.success) return invalidRequest(reply);
+      const cursor = decodeCursor(parsedQuery.data.cursor);
+      if (cursor === null) return invalidCursor(reply);
+      const viewerId = await currentViewerId(request);
+      if (!viewerId) {
+        return reply.code(401).send({
+          error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+        });
+      }
+
+      const [community] = await database
+        .select({
+          id: communities.id,
+          chatEnabled: communities.chatEnabled,
+        })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
+        });
+      }
+      if (!community.chatEnabled) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_CHAT_DISABLED",
+            message: "Community chat is not enabled.",
+          },
+        });
+      }
+      const [membership] = await database
+        .select({ userId: communityMemberships.userId })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, community.id),
+            eq(communityMemberships.userId, viewerId),
+          ),
+        )
+        .limit(1);
+      if (!membership) {
+        return reply.code(403).send({
+          error: {
+            code: "MEMBERSHIP_REQUIRED",
+            message: "Join this community to view its chat.",
+          },
+        });
+      }
+
+      const conditions = [eq(communityChatMessages.communityId, community.id)];
+      if (cursor) {
+        conditions.push(
+          or(
+            lt(communityChatMessages.createdAt, cursor.createdAt),
+            and(
+              eq(communityChatMessages.createdAt, cursor.createdAt),
+              lt(communityChatMessages.id, cursor.id),
+            ),
+          )!,
+        );
+      }
+      const rows = await database
+        .select({
+          id: communityChatMessages.id,
+          body: communityChatMessages.body,
+          mediaUrl: communityChatMessages.mediaUrl,
+          createdAt: communityChatMessages.createdAt,
+          author: {
+            id: users.id,
+            username: profiles.username,
+            displayName: profiles.displayName,
+            avatarUrl: profiles.avatarUrl,
+            avatarVersion: profiles.avatarVersion,
+            initials: profiles.initials,
+            avatarColor: profiles.avatarColor,
+            verified: profiles.isVerified,
+          },
+        })
+        .from(communityChatMessages)
+        .innerJoin(users, eq(users.id, communityChatMessages.authorId))
+        .innerJoin(profiles, eq(profiles.userId, users.id))
+        .where(and(...conditions, isNull(users.deletedAt)))
+        .orderBy(
+          desc(communityChatMessages.createdAt),
+          desc(communityChatMessages.id),
+        )
+        .limit(parsedQuery.data.limit + 1);
+      const hasMore = rows.length > parsedQuery.data.limit;
+      const descendingItems = hasMore
+        ? rows.slice(0, parsedQuery.data.limit)
+        : rows;
+      const oldestItem = descendingItems.at(-1);
+      reply.header("cache-control", "private, no-store");
+      return {
+        items: descendingItems.reverse(),
+        nextCursor:
+          hasMore && oldestItem
+            ? encodeCursor({
+                createdAt: oldestItem.createdAt,
+                id: oldestItem.id,
+              })
+            : null,
+      };
+    },
+  );
 
   app.get(
     "/api/v1/seo/sitemap",

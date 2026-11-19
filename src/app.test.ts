@@ -101,9 +101,32 @@ describe("community API", () => {
       method: "GET",
       url: "/api/v1/posts/not-a-uuid",
     });
-
     expect(response.statusCode).toBe(400);
     expect(response.json().error.code).toBe("INVALID_REQUEST");
+  });
+
+  it("protects chat lists and messages and validates chat cursors", async () => {
+    const responses = await Promise.all([
+      app.inject({ method: "GET", url: "/api/v1/me/chats" }),
+      app.inject({
+        method: "GET",
+        url: "/api/v1/communities/worldbuilding/chat/messages",
+      }),
+      app.inject({
+        method: "GET",
+        url: "/api/v1/communities/worldbuilding/chat/messages?cursor=invalid",
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/communities/worldbuilding/chat/messages",
+        payload: { body: "Hello" },
+      }),
+    ]);
+
+    expect(responses.map((response) => response.statusCode)).toEqual([
+      401, 401, 400, 401,
+    ]);
+    expect(responses[2].json().error.code).toBe("INVALID_CURSOR");
   });
 
   it("rejects malformed reply cursors before querying the database", async () => {

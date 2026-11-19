@@ -37,6 +37,7 @@ import {
 import {
   bookmarks,
   communities,
+  communityChatMessages,
   communityContentCooldowns,
   communitySlugAliases,
   communityMemberships,
@@ -115,12 +116,12 @@ const communityImageSchema = z.union([
   httpsUrlSchema,
   inlineCommunityImageSchema,
 ]);
-const postBodySchema = z
+export const postBodySchema = z
   .object({
     community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
     kind: z.enum(["text", "link", "image_url", "video_url"]),
     body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
-    url: httpsUrlSchema.optional(),
+    url: httpsUrlSchema.nullable().optional(),
   })
   .superRefine((value, context) => {
     if (!value.body && !value.url) {
@@ -175,6 +176,12 @@ const createReplySchema = z
       });
     }
   });
+export const createChatMessageSchema = z
+  .object({
+    body: z.string().trim().max(1000).default(""),
+    mediaUrl: httpsUrlSchema.optional(),
+  })
+  .refine((value) => Boolean(value.body || value.mediaUrl));
 const notificationReadSchema = z.object({ read: z.literal(true) });
 const notificationSettingsSchema = z
   .object({
@@ -231,6 +238,7 @@ const updateCommunitySchema = z
     avatarUrl: communityImageSchema.nullable().optional(),
     bannerUrl: communityImageSchema.nullable().optional(),
     websiteUrl: httpsUrlSchema.nullable().optional(),
+    chatEnabled: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0);
 const ownerTransferSchema = z.object({
@@ -299,14 +307,17 @@ const uploadSignatureSchema = z
       "post-image",
       "post-video",
       "reply-attachment",
+      "chat-image",
     ]),
     communitySlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
     postId: z.string().uuid().optional(),
     mediaType: z.enum(["image", "video"]).optional(),
   })
   .superRefine((value, context) => {
-    const needsCommunity = value.purpose.startsWith("community-") ||
-      value.purpose.startsWith("post-");
+    const needsCommunity =
+      value.purpose.startsWith("community-") ||
+      value.purpose.startsWith("post-") ||
+      value.purpose === "chat-image";
     if (needsCommunity !== Boolean(value.communitySlug)) {
       context.addIssue({
         code: "custom",
@@ -445,24 +456,24 @@ async function claimContentCooldown(
   action: "post" | "reply",
   cooldownSeconds: number,
 ): Promise<number | null> {
-  const now = new Date();
-  const nextAllowedAt = new Date(now.getTime() - cooldownSeconds * 1000);
   const [claim] = await transaction
     .insert(communityContentCooldowns)
-    .values({ userId, action, lastActionAt: now })
+    .values({ userId, action })
     .onConflictDoUpdate({
       target: [
         communityContentCooldowns.userId,
         communityContentCooldowns.action,
       ],
-      set: { lastActionAt: now },
-      where: lt(communityContentCooldowns.lastActionAt, nextAllowedAt),
+      set: { lastActionAt: sql`now()` },
+      where: sql`${communityContentCooldowns.lastActionAt} <= now() - (${cooldownSeconds} * interval '1 second')`,
     })
-    .returning({ lastActionAt: communityContentCooldowns.lastActionAt });
+    .returning({ userId: communityContentCooldowns.userId });
   if (claim) return null;
 
   const [existing] = await transaction
-    .select({ lastActionAt: communityContentCooldowns.lastActionAt })
+    .select({
+      retryAfterSeconds: sql<number>`greatest(1, ceil(extract(epoch from (${communityContentCooldowns.lastActionAt} + (${cooldownSeconds} * interval '1 second')) - now()))::integer)`,
+    })
     .from(communityContentCooldowns)
     .where(
       and(
@@ -474,15 +485,7 @@ async function claimContentCooldown(
   if (!existing) {
     throw new Error("Content cooldown state could not be loaded.");
   }
-  return Math.max(
-    1,
-    Math.ceil(
-      (existing.lastActionAt.getTime() +
-        cooldownSeconds * 1000 -
-        now.getTime()) /
-        1000,
-    ),
-  );
+  return Math.max(1, existing.retryAfterSeconds);
 }
 
 function sendContentCooldown(
@@ -997,6 +1000,39 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         folder = `sanctyria/communities/${community.id}`;
+        resourceType = "image";
+        allowedFormats = ["jpg", "jpeg", "png", "webp"];
+        maxBytes = 10 * 1024 * 1024;
+      } else if (purpose === "chat-image") {
+        const [community] = await database
+          .select({
+            id: communities.id,
+            chatEnabled: communities.chatEnabled,
+          })
+          .from(communities)
+          .innerJoin(
+            communityMemberships,
+            eq(communityMemberships.communityId, communities.id),
+          )
+          .where(
+            and(
+              eq(communities.slug, body.data.communitySlug!),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
+              eq(communities.chatEnabled, true),
+              eq(communityMemberships.userId, userId),
+            ),
+          )
+          .limit(1);
+        if (!community) {
+          return reply.code(403).send({
+            error: {
+              code: "COMMUNITY_CHAT_UNAVAILABLE",
+              message: "Join a community with chat enabled to upload images.",
+            },
+          });
+        }
+        folder = `sanctyria/communities/${community.id}/chat`;
         resourceType = "image";
         allowedFormats = ["jpg", "jpeg", "png", "webp"];
         maxBytes = 10 * 1024 * 1024;
@@ -2116,6 +2152,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             avatarUrl: communities.avatarUrl,
             bannerUrl: communities.bannerUrl,
             websiteUrl: communities.websiteUrl,
+            chatEnabled: communities.chatEnabled,
           })
           .from(communities)
           .where(
@@ -2178,6 +2215,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             ...(body.data.websiteUrl === undefined
               ? {}
               : { websiteUrl: body.data.websiteUrl }),
+            ...(body.data.chatEnabled === undefined
+              ? {}
+              : { chatEnabled: body.data.chatEnabled }),
             slug: nextSlug,
             updatedAt: new Date(),
           })
@@ -2190,6 +2230,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             avatarUrl: communities.avatarUrl,
             bannerUrl: communities.bannerUrl,
             websiteUrl: communities.websiteUrl,
+            chatEnabled: communities.chatEnabled,
           });
         if (!updated) return { kind: "notFound" as const };
         await transaction.insert(outboxEvents).values({
@@ -3343,13 +3384,157 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post(
+    "/api/v1/communities/:slug/chat/messages",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = slugParamsSchema.safeParse(request.params);
+      const body = createChatMessageSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+
+      const [community] = await database
+        .select({
+          id: communities.id,
+          chatEnabled: communities.chatEnabled,
+        })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
+        });
+      }
+      if (!community.chatEnabled) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_CHAT_DISABLED",
+            message: "Community chat is not enabled.",
+          },
+        });
+      }
+      const [membership] = await database
+        .select({ userId: communityMemberships.userId })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, community.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (!membership) {
+        return reply.code(403).send({
+          error: {
+            code: "MEMBERSHIP_REQUIRED",
+            message: "Join this community to use its chat.",
+          },
+        });
+      }
+      const [memberMute] = await database
+        .select({ userId: communityMemberMutes.userId })
+        .from(communityMemberMutes)
+        .where(
+          and(
+            eq(communityMemberMutes.communityId, community.id),
+            eq(communityMemberMutes.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (memberMute) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_MEMBER_MUTED",
+            message: "You are muted in this community and cannot chat.",
+          },
+        });
+      }
+
+      const [author] = await database
+        .select({
+          id: users.id,
+          username: profiles.username,
+          displayName: profiles.displayName,
+          avatarUrl: profiles.avatarUrl,
+          avatarVersion: profiles.avatarVersion,
+          initials: profiles.initials,
+          avatarColor: profiles.avatarColor,
+          verified: profiles.isVerified,
+        })
+        .from(users)
+        .innerJoin(profiles, eq(profiles.userId, users.id))
+        .where(
+          and(
+            eq(users.id, userId),
+            isNull(users.deletedAt),
+            isNull(users.suspendedAt),
+          ),
+        )
+        .limit(1);
+      if (!author) {
+        return reply.code(401).send({
+          error: {
+            code: "UNAUTHENTICATED",
+            message: "Sign in to continue.",
+          },
+        });
+      }
+
+      const [message] = await database.transaction(async (transaction) => {
+        const [createdMessage] = await transaction
+          .insert(communityChatMessages)
+          .values({
+            communityId: community.id,
+            authorId: userId,
+            body: body.data.body,
+            mediaUrl: body.data.mediaUrl ?? null,
+          })
+          .returning();
+        if (createdMessage) {
+          await transaction.insert(outboxEvents).values({
+            topic: "community.chat.message.created",
+            communityId: community.id,
+            entityId: createdMessage.id,
+            payload: { messageId: createdMessage.id },
+          });
+        }
+        return [createdMessage];
+      });
+      if (!message) throw new Error("Chat message could not be created.");
+      reply.header("cache-control", "no-store");
+      return reply.code(201).send({
+        message: { ...message, author },
+      });
+    },
+  );
+
+  app.post(
     "/api/v1/posts",
     { config: { rateLimit: { max: 10, timeWindow: "10 minutes" } } },
     async (request, reply) => {
       const userId = await authenticatedUserId(request, reply);
       if (!userId) return;
       const body = postBodySchema.safeParse(request.body);
-      if (!body.success) return invalidRequest(reply);
+      if (!body.success) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_REQUEST",
+            message:
+              body.error.issues[0]?.message ??
+              "The post content is invalid. Check the post text and link.",
+          },
+        });
+      }
 
       const [community] = await database
         .select({
@@ -4569,6 +4754,20 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     const poll = async () => {
       if (closed) return;
       try {
+        const chatMessageEvents = viewerId
+          ? and(
+              eq(outboxEvents.topic, "community.chat.message.created"),
+              sql`exists (
+                select 1
+                from ${communityMemberships}
+                inner join ${communities}
+                  on ${communities.id} = ${communityMemberships.communityId}
+                where ${communityMemberships.communityId} = ${outboxEvents.communityId}
+                  and ${communityMemberships.userId} = ${viewerId}
+                  and ${communities.chatEnabled} = true
+              )`,
+            )
+          : undefined;
         const eventScope = viewerId
           ? or(
               inArray(outboxEvents.topic, [
@@ -4585,6 +4784,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                 eq(outboxEvents.topic, "notification.created"),
                 eq(outboxEvents.recipientId, viewerId),
               ),
+              chatMessageEvents!,
             )!
           : inArray(outboxEvents.topic, [
               "post.created",

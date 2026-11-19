@@ -230,6 +230,7 @@ export const communities = pgTable(
     avatarUrl: text("avatar_url"),
     bannerUrl: text("banner_url"),
     websiteUrl: text("website_url"),
+    chatEnabled: boolean("chat_enabled").notNull().default(false),
     creatorId: uuid("creator_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -281,6 +282,33 @@ export const communityMemberships = pgTable(
     primaryKey({ columns: [table.userId, table.communityId] }),
     index("community_memberships_community_idx").on(
       table.communityId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const communityChatMessages = pgTable(
+  "community_chat_messages",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    communityId: uuid("community_id")
+      .notNull()
+      .references(() => communities.id, { onDelete: "cascade" }),
+    authorId: uuid("author_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    body: text("body").notNull().default(""),
+    mediaUrl: text("media_url"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("community_chat_messages_feed_idx").on(
+      table.communityId,
+      table.createdAt,
+      table.id,
+    ),
+    index("community_chat_messages_author_idx").on(
+      table.authorId,
       table.createdAt,
     ),
   ],
