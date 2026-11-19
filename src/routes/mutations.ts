@@ -21,8 +21,8 @@ import { decodeCursor, encodeCursor } from "../lib/cursor.js";
 import {
   cloudinarySignature,
   destroyCloudinaryAsset,
+  isAudioCloudinaryUploadFromFolder,
   isCloudinaryConfigured,
-  cloudinaryPublicIdFromUrl,
 } from "../lib/cloudinary.js";
 import {
   recordEmberScoreChange,
@@ -123,28 +123,6 @@ const communityImageSchema = z.union([
   httpsUrlSchema,
   inlineCommunityImageSchema,
 ]);
-
-function isAudioUploadFromExpectedCloudinaryFolder(
-  value: string | null | undefined,
-  expectedFolder: string,
-): boolean {
-  if (!value || !environment.CLOUDINARY_CLOUD_NAME) return false;
-  let url: URL;
-  try {
-    url = new URL(value);
-  } catch {
-    return false;
-  }
-  const format = url.pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
-  return (
-    ["mp3", "wav", "aac", "m4a", "ogg", "flac"].includes(format ?? "") &&
-    cloudinaryPublicIdFromUrl(
-      value,
-      environment.CLOUDINARY_CLOUD_NAME,
-      expectedFolder,
-    )?.resourceType === "video"
-  );
-}
 
 export const postBodySchema = z
   .object({
@@ -337,6 +315,7 @@ async function cleanupPostCloudinaryAssets(
 }
 export const uploadSignatureSchema = z
   .object({
+    fileName: z.string().trim().min(1).max(255).optional(),
     purpose: z.enum([
       "profile-avatar",
       "profile-banner",
@@ -384,6 +363,17 @@ export const uploadSignatureSchema = z
         code: "custom",
         path: ["mediaType"],
         message: "Post and media type are only valid for reply attachments.",
+      });
+    }
+    if (
+      value.fileName !== undefined &&
+      value.purpose !== "post-audio" &&
+      value.purpose !== "chat-audio"
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["fileName"],
+        message: "A file name is only valid for audio uploads.",
       });
     }
   });
@@ -1182,7 +1172,30 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const timestamp = Math.floor(Date.now() / 1000);
-      const publicId = randomUUID();
+      const audioFileName = body.data.fileName?.split(/[\\/]/).at(-1);
+      const sourceAudioExtension = audioFileName
+        ?.match(/\.([A-Za-z0-9]{1,8})$/)?.[1]
+        ?.toLowerCase();
+      const sanitizedAudioName = audioFileName
+        ?.replace(/\.[^.]+$/, "")
+        .normalize("NFKD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^A-Za-z0-9_-]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 80);
+      const audioPublicIdPrefix =
+        purpose === "post-audio" || purpose === "chat-audio"
+          ? sanitizedAudioName
+            ? `${sanitizedAudioName}${
+                sourceAudioExtension
+                  ? `--fileext-${sourceAudioExtension}`
+                  : ""
+              }`
+            : "audio"
+          : null;
+      const publicId = audioPublicIdPrefix
+        ? `${audioPublicIdPrefix}--${randomUUID()}`
+        : randomUUID();
       const parameters = {
         allowed_formats: allowedFormats.join(","),
         folder,
@@ -1203,7 +1216,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         resourceType,
         allowedFormats,
         maxBytes,
-        maxVideoDurationSeconds: resourceType === "video" ? 180 : null,
+        maxVideoDurationSeconds:
+          purpose === "post-audio" || purpose === "chat-audio"
+            ? 300
+            : resourceType === "video"
+            ? 180
+            : null,
       };
     },
   );
@@ -3589,8 +3607,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       }
       if (
         body.data.mediaKind === "audio_url" &&
-        !isAudioUploadFromExpectedCloudinaryFolder(
+        !isAudioCloudinaryUploadFromFolder(
           body.data.mediaUrl,
+          environment.CLOUDINARY_CLOUD_NAME,
           `sanctyria/communities/${community.id}/chat`,
         )
       ) {
@@ -3949,8 +3968,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       }
       if (
         body.data.kind === "audio_url" &&
-        !isAudioUploadFromExpectedCloudinaryFolder(
+        !isAudioCloudinaryUploadFromFolder(
           body.data.url,
+          environment.CLOUDINARY_CLOUD_NAME,
           `sanctyria/users/${userId}/posts/${community.id}`,
         )
       ) {
@@ -4216,7 +4236,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!params.success || !body.success) return invalidRequest(reply);
 
     const post = await manageablePost(userId, params.data.id);
-    if (!post) {
+    if (!post || post.authorId !== userId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
       });
@@ -4621,7 +4641,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!params.success || !body.success) return invalidRequest(reply);
 
     const target = await manageableReply(userId, params.data.id);
-    if (!target) {
+    if (!target || target.authorId !== userId) {
       return reply.code(404).send({
         error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
       });

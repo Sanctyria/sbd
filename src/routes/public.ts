@@ -1523,7 +1523,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             from ${replies}
             inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
             where ${replies.postId} = ${posts.id}
-              and (${replies.deletedAt} is null or ${replies.deletedByModerator})
+              and ${replies.deletedAt} is null
               and reply_author.deleted_at is null
               ${
                 viewerId
@@ -1941,7 +1941,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           from ${replies}
           inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
           where ${replies.postId} = ${posts.id}
-            and (${replies.deletedAt} is null or ${replies.deletedByModerator})
+            and ${replies.deletedAt} is null
             and reply_author.deleted_at is null
             ${
               viewerId
@@ -2092,7 +2092,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       from ${replies}
       inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
       where ${replies.postId} = ${posts.id}
-        and (${replies.deletedAt} is null or ${replies.deletedByModerator})
+        and ${replies.deletedAt} is null
         and reply_author.deleted_at is null
         ${
           viewerId
@@ -2303,7 +2303,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     }
     if (post.isModeratorRemoved) return { items: [], nextCursor: null };
 
-    const conditions = [eq(replies.postId, post.id), isNull(users.deletedAt)];
+    const conditions = [
+      eq(replies.postId, post.id),
+      isNull(replies.deletedAt),
+      isNull(users.deletedAt),
+    ];
     if (viewerId) {
       conditions.push(
         sql`not exists (
@@ -2445,7 +2449,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           from ${replies}
           inner join ${users} as reply_author on reply_author.id = ${replies.authorId}
           where ${replies.postId} = ${posts.id}
-            and (${replies.deletedAt} is null or ${replies.deletedByModerator})
+            and ${replies.deletedAt} is null
             and reply_author.deleted_at is null
             ${
               viewerId
@@ -2591,6 +2595,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           .where(
             and(
               eq(replies.postId, post.id),
+              isNull(replies.deletedAt),
               isNull(users.deletedAt),
               ...(viewerId
                 ? [

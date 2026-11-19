@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  isAudioCloudinaryUploadFromFolder,
   cloudinaryPublicIdFromUrl,
   cloudinarySignature,
 } from "./cloudinary.js";
@@ -30,6 +31,35 @@ describe("Cloudinary public ID parsing", () => {
     ).toEqual({
       publicId: "sanctyria/users/u/replies/id",
       resourceType: "video",
+    });
+  });
+
+  describe("Cloudinary audio upload validation", () => {
+    it("accepts signed audio uploads returned with an mp4 extension", () => {
+      expect(
+        isAudioCloudinaryUploadFromFolder(
+          "https://res.cloudinary.com/demo/video/upload/v123/sanctyria/users/u/posts/c/audio.mp4",
+          "demo",
+          "sanctyria/users/u/posts/c",
+        ),
+      ).toBe(true);
+    });
+
+    it("keeps audio uploads restricted to the signed video resource and folder", () => {
+      expect(
+        isAudioCloudinaryUploadFromFolder(
+          "https://res.cloudinary.com/demo/video/upload/sanctyria/users/u/posts/other/audio.m4a",
+          "demo",
+          "sanctyria/users/u/posts/c",
+        ),
+      ).toBe(false);
+      expect(
+        isAudioCloudinaryUploadFromFolder(
+          "https://res.cloudinary.com/demo/image/upload/sanctyria/users/u/posts/c/audio.m4a",
+          "demo",
+          "sanctyria/users/u/posts/c",
+        ),
+      ).toBe(false);
     });
   });
 

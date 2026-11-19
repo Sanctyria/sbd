@@ -73,6 +73,27 @@ export function cloudinaryPublicIdFromUrl(
   return { publicId, resourceType };
 }
 
+export function isAudioCloudinaryUploadFromFolder(
+  value: string | null | undefined,
+  cloudName: string | undefined,
+  expectedFolder: string,
+): boolean {
+  if (!value || !cloudName) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch (error) {
+    if (error instanceof TypeError) return false;
+    throw error;
+  }
+  const format = url.pathname.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+  return (
+    ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"].includes(format ?? "") &&
+    cloudinaryPublicIdFromUrl(value, cloudName, expectedFolder)?.resourceType ===
+      "video"
+  );
+}
+
 export async function destroyCloudinaryAsset(
   value: string | null | undefined,
   expectedFolder: string,

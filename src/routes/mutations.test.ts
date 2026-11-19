@@ -83,6 +83,7 @@ describe("community mutation request schemas", () => {
       uploadSignatureSchema.safeParse({
         purpose: "post-audio",
         communitySlug: "worldbuilding",
+        fileName: "My Song.m4a",
       }).success,
     ).toBe(true);
     expect(
@@ -94,6 +95,13 @@ describe("community mutation request schemas", () => {
         communitySlug: "worldbuilding",
       }).success,
     ).toBe(true);
+    expect(
+      uploadSignatureSchema.safeParse({
+        purpose: "post-image",
+        communitySlug: "worldbuilding",
+        fileName: "not-an-audio-file.jpg",
+      }).success,
+    ).toBe(false);
   });
 
   it("validates per-community chat notification settings", () => {
