@@ -176,7 +176,9 @@ export function makeMessage(delivery: ClaimedDelivery) {
     (delivery.notification_type === "system" && action === "follow"
       ? `${actorName} started following you`
       : delivery.notification_type === "reply"
-        ? targetKind === "reply"
+        ? action === "chat_message"
+          ? `${actorName} replied in ${communityName ?? "a community chat"}`
+          : targetKind === "reply"
           ? `${actorName} replied to your reply`
           : `${actorName} replied to your post`
         : delivery.notification_type === "mention"
@@ -221,10 +223,9 @@ export function makeMessage(delivery: ClaimedDelivery) {
   const deepLink =
     delivery.notification_type === "community" && communitySlug
       ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
-      : delivery.notification_type === "mention" &&
-          action === "chat_message" &&
+      : action === "chat_message" &&
           communitySlug
-        ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
+        ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}/chat`
       : delivery.notification_type === "system" && actorUsername
         ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
         : delivery.entity_id
@@ -256,6 +257,7 @@ export function makeMessage(delivery: ClaimedDelivery) {
   };
   const supportsPostActions =
     delivery.entity_id !== null &&
+    action !== "chat_message" &&
     ["reply", "mention", "reaction"].includes(delivery.notification_type);
 
   return {

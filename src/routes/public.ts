@@ -35,6 +35,7 @@ import {
   communityNotificationMutes,
   emberEvents,
   notifications,
+  profileBadges,
   postReactions,
   replyReactions,
   posts,
@@ -69,6 +70,14 @@ const communitiesQuerySchema = pageQuerySchema.extend({
 const communityMembersQuerySchema = pageQuerySchema.extend({
   usernamePrefix: z.string().regex(/^[A-Za-z0-9_]{0,32}$/).optional(),
 });
+const communityChatMessagesQuerySchema = pageQuerySchema.extend({
+  search: z.string().trim().min(1).max(100).optional(),
+});
+const communityMemberCursorSchema = z.object({
+  createdAt: z.string().datetime(),
+  id: z.string().uuid(),
+  priority: z.number().int().min(0).max(2),
+});
 
 const profileActivityQuerySchema = pageQuerySchema.extend({
   type: z.enum(["posts", "replies"]).default("posts"),
@@ -85,6 +94,39 @@ const notificationsQuerySchema = pageQuerySchema.extend({
 const linkPreviewQuerySchema = z.object({
   url: z.string().trim().min(1).max(2048).url(),
 });
+
+function decodeCommunityMemberCursor(
+  value?: string,
+): { createdAt: Date; id: string; priority: number } | null | undefined {
+  if (!value) return undefined;
+  try {
+    const parsed = communityMemberCursorSchema.safeParse(
+      JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
+    );
+    if (!parsed.success) return null;
+    return {
+      createdAt: new Date(parsed.data.createdAt),
+      id: parsed.data.id,
+      priority: parsed.data.priority,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function encodeCommunityMemberCursor(cursor: {
+  createdAt: Date;
+  id: string;
+  priority: number;
+}): string {
+  return Buffer.from(
+    JSON.stringify({
+      createdAt: cursor.createdAt.toISOString(),
+      id: cursor.id,
+      priority: cursor.priority,
+    }),
+  ).toString("base64url");
+}
 
 const feedQuerySchema = pageQuerySchema
   .extend({
@@ -813,7 +855,9 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     "/api/v1/communities/:slug/chat/messages",
     async (request, reply) => {
       const params = slugParamsSchema.safeParse(request.params);
-      const parsedQuery = pageQuerySchema.safeParse(request.query);
+      const parsedQuery = communityChatMessagesQuerySchema.safeParse(
+        request.query,
+      );
       if (!params.success || !parsedQuery.success) return invalidRequest(reply);
       const cursor = decodeCursor(parsedQuery.data.cursor);
       if (cursor === null) return invalidCursor(reply);
@@ -893,6 +937,10 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         });
 
       const conditions = [eq(communityChatMessages.communityId, community.id)];
+      if (parsedQuery.data.search) {
+        const searchTerm = parsedQuery.data.search.replace(/[\\%_]/g, "\\$&");
+        conditions.push(ilike(communityChatMessages.body, `%${searchTerm}%`));
+      }
       if (cursor) {
         conditions.push(
           or(
@@ -1090,13 +1138,14 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const parsedQuery = communityMembersQuerySchema.safeParse(request.query);
     if (!parsedParams.success || !parsedQuery.success)
       return invalidRequest(reply);
-    const cursor = decodeCursor(parsedQuery.data.cursor);
+    const cursor = decodeCommunityMemberCursor(parsedQuery.data.cursor);
     if (cursor === null) return invalidCursor(reply);
     const viewerId = await currentViewerId(request);
 
     const [community] = await database
       .select({
         id: communities.id,
+        creatorId: communities.creatorId,
         viewerRole: viewerId
           ? sql<string | null>`(
               select ${communityMemberships.role}
@@ -1134,6 +1183,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       eq(communityMemberships.communityId, community.id),
       isNull(users.deletedAt),
     ];
+    const memberPriority = sql<number>`case
+      when ${communityMemberships.userId} = ${community.creatorId}
+        or ${communityMemberships.role} = 'owner' then 0
+      when ${communityMemberships.role} = 'moderator' then 1
+      else 2
+    end`;
     if (parsedQuery.data.usernamePrefix) {
       conditions.push(
         ilike(profiles.username, `${parsedQuery.data.usernamePrefix}%`),
@@ -1151,10 +1206,16 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     if (cursor) {
       conditions.push(
         or(
-          lt(communityMemberships.createdAt, cursor.createdAt),
+          sql`${memberPriority} > ${cursor.priority}`,
           and(
-            eq(communityMemberships.createdAt, cursor.createdAt),
-            lt(communityMemberships.userId, cursor.id),
+            eq(memberPriority, cursor.priority),
+            or(
+              lt(communityMemberships.createdAt, cursor.createdAt),
+              and(
+                eq(communityMemberships.createdAt, cursor.createdAt),
+                lt(communityMemberships.userId, cursor.id),
+              ),
+            ),
           ),
         )!,
       );
@@ -1172,11 +1233,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         ember: profiles.ember,
         verified: profiles.isVerified,
         createdAt: communityMemberships.createdAt,
-        role:
-          community.viewerRole === "owner" ||
-          community.viewerRole === "moderator"
-            ? communityMemberships.role
-            : sql<string | null>`null`,
+        role: communityMemberships.role,
         isMuted:
           community.viewerRole === "owner" ||
           community.viewerRole === "moderator"
@@ -1192,6 +1249,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(profiles, eq(profiles.userId, users.id))
       .where(and(...conditions))
       .orderBy(
+        asc(memberPriority),
         desc(communityMemberships.createdAt),
         desc(communityMemberships.userId),
       )
@@ -1200,6 +1258,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const hasMore = rows.length > parsedQuery.data.limit;
     const items = hasMore ? rows.slice(0, parsedQuery.data.limit) : rows;
     const lastItem = items.at(-1);
+    const lastItemPriority = lastItem
+      ? lastItem.id === community.creatorId || lastItem.role === "owner"
+        ? 0
+        : lastItem.role === "moderator"
+          ? 1
+          : 2
+      : null;
     reply.header(
       "cache-control",
       viewerId
@@ -1208,7 +1273,13 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     );
     return {
       items,
-      nextCursor: hasMore && lastItem ? encodeCursor(lastItem) : null,
+      nextCursor: hasMore && lastItem && lastItemPriority !== null
+        ? encodeCommunityMemberCursor({
+            createdAt: lastItem.createdAt,
+            id: lastItem.id,
+            priority: lastItemPriority,
+          })
+        : null,
     };
   });
 
@@ -1253,6 +1324,30 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       profile.indexingOptedIn,
       profile.bio,
     );
+    const grantedBadges = await database
+      .select({ badgeKey: profileBadges.badgeKey })
+      .from(profileBadges)
+      .where(eq(profileBadges.userId, profile.userId));
+    const badges = new Set(
+      grantedBadges
+        .map(({ badgeKey }) => badgeKey)
+        .filter((badgeKey) => badgeKey !== "staff"),
+    );
+    if (profile.verified) badges.add("verified");
+    if (environment.CORE_ADMIN_USER_IDS.includes(profile.userId)) {
+      badges.add("staff");
+    }
+    const [createdCommunity] = await database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(
+        and(
+          eq(communities.creatorId, profile.userId),
+          eq(communities.status, "active"),
+        ),
+      )
+      .limit(1);
+    if (createdCommunity) badges.add("community_creator");
     const memberships = await database
       .select({
         slug: communities.slug,
@@ -1376,6 +1471,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         isBlocked,
         isBlockedBy,
         isMuted,
+        badges: [...badges],
       },
     };
   });
@@ -1594,6 +1690,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
                   and ${bookmarks.userId} = ${viewerId}
               )`
             : sql<boolean>`false`,
+          isProfilePinned: sql<boolean>`${posts.profilePinnedAt} is not null`,
+          isCommunityPinned: sql<boolean>`${posts.communityPinnedAt} is not null`,
           canManage: viewerId
             ? sql<boolean>`${posts.deletedAt} is null and (
                 ${posts.authorId} = ${viewerId}
@@ -1631,7 +1729,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         .innerJoin(users, eq(posts.authorId, users.id))
         .innerJoin(profiles, eq(users.id, profiles.userId))
         .where(and(...conditions))
-        .orderBy(desc(posts.createdAt), desc(posts.id))
+        .orderBy(
+          asc(sql`case when ${posts.profilePinnedAt} is null then 1 else 0 end`),
+          desc(posts.createdAt),
+          desc(posts.id),
+        )
         .limit(parsedQuery.data.limit + 1);
       const hasMore = results.length > parsedQuery.data.limit;
       const items = hasMore
@@ -2227,6 +2329,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         isBookmarked: viewerId
           ? sql<boolean>`exists (select 1 from ${bookmarks} where ${bookmarks.postId} = ${posts.id} and ${bookmarks.userId} = ${viewerId})`
           : sql<boolean>`false`,
+        isProfilePinned: sql<boolean>`${posts.profilePinnedAt} is not null`,
+        isCommunityPinned: sql<boolean>`${posts.communityPinnedAt} is not null`,
         canManage: viewerId
           ? sql<boolean>`${posts.deletedAt} is null and (
               ${posts.authorId} = ${viewerId}
@@ -2265,6 +2369,19 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(profiles, eq(users.id, profiles.userId))
       .where(and(...conditions))
       .orderBy(
+        ...(parsedQuery.data.scope === "community"
+          ? [
+              asc(
+                sql`case when ${posts.communityPinnedAt} is null then 1 else 0 end`,
+              ),
+            ]
+          : parsedQuery.data.scope === "profile"
+            ? [
+                asc(
+                  sql`case when ${posts.profilePinnedAt} is null then 1 else 0 end`,
+                ),
+              ]
+            : []),
         ...(parsedQuery.data.sort === "hot"
           ? [
               desc(posts.voteCount),
@@ -2511,6 +2628,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         isBookmarked: viewerId
           ? sql<boolean>`exists (select 1 from ${bookmarks} where ${bookmarks.postId} = ${posts.id} and ${bookmarks.userId} = ${viewerId})`
           : sql<boolean>`false`,
+        isProfilePinned: sql<boolean>`${posts.profilePinnedAt} is not null`,
+        isCommunityPinned: sql<boolean>`${posts.communityPinnedAt} is not null`,
         canManage: viewerId
           ? sql<boolean>`${posts.deletedAt} is null and (
               ${posts.authorId} = ${viewerId}

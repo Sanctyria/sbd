@@ -7,6 +7,7 @@ import {
   gte,
   gt,
   inArray,
+  isNotNull,
   isNull,
   ne,
   lt,
@@ -91,6 +92,10 @@ const REPLY_CREATION_COOLDOWN_SECONDS = 15;
 let activeEventStreamCount = 0;
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
+const postPinParamsSchema = z.object({
+  id: z.string().uuid(),
+  scope: z.enum(["profile", "community"]),
+});
 const slugParamsSchema = z.object({
   slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
 });
@@ -3524,6 +3529,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           chatEnabled: communities.chatEnabled,
           creatorId: communities.creatorId,
           slug: communities.slug,
+          name: communities.name,
         })
         .from(communities)
         .where(
@@ -3754,11 +3760,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         sharedItem = item;
       }
       let replyToBody: string | null = null;
+      let replyToAuthorId: string | null = null;
       if (body.data.replyToId) {
         const [parent] = await database
           .select({
             id: communityChatMessages.id,
             body: communityChatMessages.body,
+            authorId: communityChatMessages.authorId,
           })
           .from(communityChatMessages)
           .where(
@@ -3777,6 +3785,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         replyToBody = parent.body;
+        replyToAuthorId = parent.authorId;
       }
       const [message] = await database.transaction(async (transaction) => {
         const [createdMessage] = await transaction
@@ -3802,6 +3811,75 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             entityId: createdMessage.id,
             payload: { messageId: createdMessage.id },
           });
+
+          let chatReplyRecipientId: string | null = null;
+          if (replyToAuthorId && replyToAuthorId !== userId) {
+            const [replyRecipient] = await transaction
+              .select({ userId: communityMemberships.userId })
+              .from(communityMemberships)
+              .innerJoin(users, eq(users.id, communityMemberships.userId))
+              .leftJoin(
+                notificationPreferences,
+                eq(notificationPreferences.userId, users.id),
+              )
+              .leftJoin(
+                communityChatPreferences,
+                and(
+                  eq(communityChatPreferences.userId, users.id),
+                  eq(communityChatPreferences.communityId, community.id),
+                ),
+              )
+              .leftJoin(
+                communityNotificationMutes,
+                and(
+                  eq(communityNotificationMutes.userId, users.id),
+                  eq(communityNotificationMutes.communityId, community.id),
+                ),
+              )
+              .where(
+                and(
+                  eq(communityMemberships.communityId, community.id),
+                  eq(communityMemberships.userId, replyToAuthorId),
+                  isNull(users.deletedAt),
+                  isNull(users.suspendedAt),
+                  isNull(communityNotificationMutes.userId),
+                  sql`coalesce(${notificationPreferences.replies}, true)`,
+                  sql`coalesce(${communityChatPreferences.notificationsEnabled}, true)`,
+                ),
+              )
+              .limit(1);
+            if (replyRecipient) {
+              const [createdNotification] = await transaction
+                .insert(notifications)
+                .values({
+                  recipientId: replyRecipient.userId,
+                  type: "reply",
+                  entityId: createdMessage.id,
+                  payload: {
+                    action: "chat_message",
+                    targetKind: "chat_reply",
+                    actorUsername: author.username,
+                    actorName: author.displayName,
+                    preview: body.data.body.slice(0, 180),
+                    communitySlug: community.slug,
+                    communityName: community.name,
+                  },
+                })
+                .returning({
+                  id: notifications.id,
+                  recipientId: notifications.recipientId,
+                });
+              if (createdNotification) {
+                chatReplyRecipientId = createdNotification.recipientId;
+                await transaction.insert(outboxEvents).values({
+                  topic: "notification.created",
+                  recipientId: createdNotification.recipientId,
+                  entityId: createdNotification.id,
+                  payload: { notificationId: createdNotification.id },
+                });
+              }
+            }
+          }
 
           if (everyoneMention || mentionedUsernames.length > 0) {
             const mentionedRecipients = await transaction
@@ -3841,11 +3919,15 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                     : inArray(profiles.username, mentionedUsernames),
                 ),
               );
-            if (mentionedRecipients.length) {
+            const uniqueMentionRecipients = mentionedRecipients.filter(
+              ({ userId: recipientId }) =>
+                recipientId !== chatReplyRecipientId,
+            );
+            if (uniqueMentionRecipients.length) {
               const createdNotifications = await transaction
                 .insert(notifications)
                 .values(
-                  mentionedRecipients.map(({ userId: recipientId }) => ({
+                  uniqueMentionRecipients.map(({ userId: recipientId }) => ({
                     recipientId,
                     type: "mention" as const,
                     entityId: createdMessage.id,
@@ -4894,6 +4976,128 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     }
     return reply.code(204).send();
   });
+
+  const updatePostPin = async (
+    request: FastifyRequest,
+    reply: FastifyReply,
+    pinned: boolean,
+  ) => {
+    const userId = await authenticatedUserId(request, reply);
+    if (!userId) return;
+    const params = postPinParamsSchema.safeParse(request.params);
+    if (!params.success) return invalidRequest(reply);
+
+    const [post] = await database
+      .select({
+        id: posts.id,
+        authorId: posts.authorId,
+        communityId: posts.communityId,
+        creatorId: communities.creatorId,
+      })
+      .from(posts)
+      .innerJoin(communities, eq(communities.id, posts.communityId))
+      .where(
+        and(
+          eq(posts.id, params.data.id),
+          isNull(posts.deletedAt),
+          eq(communities.isPublic, true),
+          eq(communities.status, "active"),
+        ),
+      )
+      .limit(1);
+    if (!post) {
+      return reply.code(404).send({
+        error: { code: "POST_NOT_FOUND", message: "Post not found." },
+      });
+    }
+
+    if (params.data.scope === "profile") {
+      if (post.authorId !== userId) {
+        return reply.code(403).send({
+          error: {
+            code: "PROFILE_PIN_FORBIDDEN",
+            message: "You can only pin your own posts on your profile.",
+          },
+        });
+      }
+    } else {
+      const [membership] = await database
+        .select({ role: communityMemberships.role })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, post.communityId),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (
+        post.creatorId !== userId &&
+        membership?.role !== "owner" &&
+        membership?.role !== "moderator"
+      ) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_PIN_FORBIDDEN",
+            message: "Only community owners and moderators can pin posts.",
+          },
+        });
+      }
+    }
+
+    await database.transaction(async (transaction) => {
+      const now = new Date();
+      if (pinned && params.data.scope === "profile") {
+        await transaction
+          .update(posts)
+          .set({ profilePinnedAt: null, updatedAt: now })
+          .where(
+            and(
+              eq(posts.authorId, post.authorId),
+              ne(posts.id, post.id),
+              isNotNull(posts.profilePinnedAt),
+            ),
+          );
+      } else if (pinned) {
+        await transaction
+          .update(posts)
+          .set({ communityPinnedAt: null, updatedAt: now })
+          .where(
+            and(
+              eq(posts.communityId, post.communityId),
+              ne(posts.id, post.id),
+              isNotNull(posts.communityPinnedAt),
+            ),
+          );
+      }
+      await transaction
+        .update(posts)
+        .set({
+          ...(params.data.scope === "profile"
+            ? { profilePinnedAt: pinned ? now : null }
+            : { communityPinnedAt: pinned ? now : null }),
+          updatedAt: now,
+        })
+        .where(eq(posts.id, post.id));
+      await transaction.insert(outboxEvents).values({
+        topic: "post.updated",
+        communityId: post.communityId,
+        entityId: post.id,
+        payload: { postId: post.id, pinScope: params.data.scope },
+      });
+    });
+
+    return reply.send({ pinned });
+  };
+
+  app.post(
+    "/api/v1/posts/:id/pin/:scope",
+    async (request, reply) => updatePostPin(request, reply, true),
+  );
+  app.delete(
+    "/api/v1/posts/:id/pin/:scope",
+    async (request, reply) => updatePostPin(request, reply, false),
+  );
 
   app.post(
     "/api/v1/posts/:id/replies",

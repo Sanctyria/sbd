@@ -8,6 +8,7 @@ import {
   communities,
   communityMemberships,
   posts,
+  profileBadges,
   profiles,
   replies,
   userCredentials,
@@ -183,6 +184,16 @@ async function seedDemoData(): Promise<void> {
           updatedAt: new Date(),
         },
       });
+
+    await transaction
+      .insert(profileBadges)
+      .values(
+        ["early_supporter", "beta_tester"].map((badgeKey) => ({
+          userId: officialAccount.id,
+          badgeKey,
+        })),
+      )
+      .onConflictDoNothing();
 
     await transaction
       .insert(userCredentials)

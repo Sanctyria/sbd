@@ -178,7 +178,35 @@ describe("push delivery message", () => {
 
     expect(message.data).toMatchObject({
       title: "Mira Voss notified everyone",
-      deepLink: "https://sanctyria.com/r/worldbuilding",
+      deepLink: "https://sanctyria.com/r/worldbuilding/chat",
     });
+    expect(message.apns.payload.aps.category).toBeUndefined();
+  });
+
+  it("routes chat reply pushes to the channel without post actions", () => {
+    const message = makeMessage({
+      event_id: "event-id",
+      device_id: "device-id",
+      fid: "firebase-installation-id",
+      notification_id: "notification-id",
+      notification_type: "reply",
+      entity_id: "chat-message-id",
+      payload: {
+        action: "chat_message",
+        targetKind: "chat_reply",
+        actorName: "Mira Voss",
+        preview: "A reply in chat",
+        communityName: "Worldbuilding",
+        communitySlug: "worldbuilding",
+      },
+      attempts: 0,
+    });
+
+    expect(message.data).toMatchObject({
+      title: "Mira Voss replied in Worldbuilding",
+      body: "A reply in chat",
+      deepLink: "https://sanctyria.com/r/worldbuilding/chat",
+    });
+    expect(message.apns.payload.aps.category).toBeUndefined();
   });
 });

@@ -148,6 +148,21 @@ export const profiles = pgTable(
   (table) => [uniqueIndex("profiles_username_uidx").on(table.username)],
 );
 
+export const profileBadges = pgTable(
+  "profile_badges",
+  {
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    badgeKey: text("badge_key").notNull(),
+    grantedAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.userId, table.badgeKey] }),
+    index("profile_badges_user_idx").on(table.userId),
+  ],
+);
+
 export const userFollows = pgTable(
   "user_follows",
   {
@@ -376,6 +391,10 @@ export const posts = pgTable(
     isNews: boolean("is_news").notNull().default(false),
     body: text("body").notNull(),
     url: text("url"),
+    profilePinnedAt: timestamp("profile_pinned_at", { withTimezone: true }),
+    communityPinnedAt: timestamp("community_pinned_at", {
+      withTimezone: true,
+    }),
     linkTitle: text("link_title"),
     linkDescription: text("link_description"),
     linkDomain: text("link_domain"),
@@ -399,6 +418,12 @@ export const posts = pgTable(
     ),
     index("posts_public_feed_idx").on(table.createdAt, table.id),
     index("posts_author_idx").on(table.authorId, table.createdAt, table.id),
+    uniqueIndex("posts_author_profile_pin_unique")
+      .on(table.authorId)
+      .where(sql`${table.profilePinnedAt} is not null`),
+    uniqueIndex("posts_community_pin_unique")
+      .on(table.communityId)
+      .where(sql`${table.communityPinnedAt} is not null`),
   ],
 );
 

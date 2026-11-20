@@ -211,6 +211,20 @@
       "when": 1795132634647,
       "tag": "0029_graceful_raza",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1795159920484,
+      "tag": "0030_mixed_wild_pack",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1795160872832,
+      "tag": "0031_grant_named_profile_badges",
+      "breakpoints": true
     }
   ]
 }

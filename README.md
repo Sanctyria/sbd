@@ -6,7 +6,8 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
 
 - Account signup/login, HTTP-only sessions, and profile management, including HTTPS avatar and banner image URLs.
 - Public communities, membership, posts, nested replies, reactions, votes, bookmarks, and notifications.
-- Community chat with owner-only `@everyone`, mention notifications, per-community notification preferences, and unread counts.
+- Community chat with owner-only `@everyone`, reply and mention notifications, per-community notification preferences, and unread counts.
+- Profile and community post pinning, plus profile achievement badges.
 - Community-owner moderation and global Core administration with audited actions.
 - Journal CMS, community announcement banners, and aggregated analytics.
 - Audited search-index approvals for communities and explicit profile indexing opt-in.
@@ -119,7 +120,7 @@ When `SENTRY_DSN` is configured, the backend sends server errors to Sentry with 
 - Configure a PayPal REST app and webhook, then set `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, `PAYPAL_WEBHOOK_ID`, and `PAYPAL_ENVIRONMENT=live`. Point PayPal at `https://sanctyria.com/api/community/webhooks/paypal`; signatures are checked through PayPal's verification API. Test with sandbox credentials first.
 - Checkout amounts are one-time USD payments from $1 through $5,000. Cash App and self-hosted crypto wallet transfers are direct payments, not webhook-backed confirmations; configure `CASH_APP_TAG` or all three `CRYPTO_WALLET_*` values only after confirming the destination, asset, and network. Never accept funds on an address whose network/asset has not been verified.
 - `/donate` presents the refund policy and only enables methods configured on the backend. Donations are generally non-refundable, subject to applicable law and payment-provider rules; accidental/unauthorized payment queries should be handled through the support channel.
-- Native push is optional. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply migrations `0019_silly_stryfe.sql`, `0020_fair_lady_mastermind.sql`, and `0021_cold_stranger.sql` before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
+- Native push is opt-in in the mobile app's Notifications screen. The Android app initializes Firebase by default; iOS remains disabled until its Firebase options and APNs capability are configured. Configure a Firebase service account in the backend deployment secret manager as `FIREBASE_SERVICE_ACCOUNT_JSON`, or set `GOOGLE_APPLICATION_CREDENTIALS` to a mounted key-file path; either enables the in-process worker to consume committed `notification.created` outbox events and retry transient FCM failures. Apply all pending migrations, including `0019_silly_stryfe.sql`, `0020_fair_lady_mastermind.sql`, `0021_cold_stranger.sql`, and `0030_mixed_wild_pack.sql`, before deploying this version. Device registrations are bound to a session and are removed when that session is deleted. Do not put Firebase service-account credentials in the mobile app or repository.
 - Mobile uploads use signed Cloudinary requests. Configure `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, and `CLOUDINARY_API_SECRET` in the backend environment/secret manager. The API secret must never be added to Flutter build defines or client configuration. The app enforces 10 MB images and 50 MB videos (up to 3 minutes); also set appropriate upload limits in the Cloudinary account.
 - Post audio and chat audio use upload purposes `post-audio` and `chat-audio`; they are signed as Cloudinary `video` resources, restricted to MP3, WAV, AAC, M4A, OGG, and FLAC, with a 20 MB limit. Chat authors include their `role` (`owner`, `moderator`, or `member`); `/api/v1/me/chats` includes `viewerRole`, `chatNotificationsEnabled`, and `unreadCount`. Reading a chat message page records its read time. Update per-community notification settings with `PATCH /api/v1/communities/:slug/chat/notifications` and `{ "chatNotificationsEnabled": false }`. Only a community creator or `owner` role can send `@everyone`; moderators cannot.
 
@@ -146,7 +147,8 @@ All API routes are under `/api/v1`.
 | Health                   | `GET /health`, `GET /ready`                                                                                                     |
 | Authentication           | `POST /auth/signup`, `POST /auth/login`, `GET /me`, `DELETE /auth/session`                                                      |
 | Profiles                 | `GET /profiles/:username`, profile activity and connections, `PATCH /me/profile` (including avatar and banner URLs), follow/unfollow |
-| Communities              | `GET /communities`, `GET /communities/:slug`, membership, members, and community creation/update                                |
+| Communities              | `GET /communities`, `GET /communities/:slug`, membership, members, and community creation/update                                      |
+| Community chat           | `GET /communities/:slug/chat/messages?search=...`, message send/edit/delete, and channel preferences                                |
 | Feed and content         | `GET /feed`, `GET /posts/:id`, replies, reactions, votes, bookmarks, and reports                                                |
 | Notifications and events | `GET /notifications`, notification reads, `GET /events` (SSE), and authenticated `POST`/`DELETE /me/push-device`                |
 | Search and previews      | `GET /search`, `GET /link-preview?url=...`                                                                                      |
@@ -155,6 +157,8 @@ All API routes are under `/api/v1`.
 | Core administration      | `/core/overview`, `/core/users`, `/core/communities`, `/core/moderation`, `/core/marketing`, `/core/banners`, `/core/analytics` |
 
 The Core API checks configured administrator UUIDs server-side. Community-owner or moderator status does not grant global administrator access. The super-admin list must be a subset of the admin list. Administrative changes and moderation decisions are audited. Demo seeding is disabled when `NODE_ENV=production`.
+
+Profile badges are returned by `GET /profiles/:username`: early-supporter and beta-tester grants are stored in `profile_badges`, verified and community-creator badges are derived from account state, and the staff badge is derived only from `CORE_ADMIN_USER_IDS`. The demo `@sanctyria` account receives early-supporter and beta-tester grants when seeded; migration `0031` grants beta-tester to `@watcher` and `@dimacods`, and early-supporter plus beta-tester to `@chipcheese`.
 
 Use the route implementations and schemas as the source of truth for request and response shapes. Public listing endpoints use bounded cursor pagination where applicable.
 

@@ -135,6 +135,10 @@ describe("community API", () => {
         url: "/api/v1/communities/worldbuilding/chat/messages?cursor=invalid",
       }),
       app.inject({
+        method: "GET",
+        url: "/api/v1/communities/worldbuilding/chat/messages?search=",
+      }),
+      app.inject({
         method: "POST",
         url: "/api/v1/communities/worldbuilding/chat/messages",
         payload: { body: "Hello" },
@@ -151,9 +155,10 @@ describe("community API", () => {
     ]);
 
     expect(responses.map((response) => response.statusCode)).toEqual([
-      401, 401, 400, 401, 401, 401,
+      401, 401, 400, 400, 401, 401, 401,
     ]);
     expect(responses[2].json().error.code).toBe("INVALID_CURSOR");
+    expect(responses[3].json().error.code).toBe("INVALID_REQUEST");
   });
 
   it("rejects malformed reply cursors before querying the database", async () => {
