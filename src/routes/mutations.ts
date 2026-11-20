@@ -44,6 +44,7 @@ import {
   bookmarks,
   communities,
   communityChatMessages,
+  communityChatMessageReactions,
   communityChatPreferences,
   communityContentCooldowns,
   communitySlugAliases,
@@ -128,6 +129,7 @@ export const postBodySchema = z
   .object({
     community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
     kind: z.enum(["text", "link", "image_url", "video_url", "audio_url"]),
+    isNews: z.boolean().default(false),
     body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
     url: httpsUrlSchema.nullable().optional(),
   })
@@ -189,12 +191,41 @@ export const createChatMessageSchema = z
     body: z.string().trim().max(1000).default(""),
     mediaUrl: httpsUrlSchema.optional(),
     mediaKind: z.enum(["image_url", "audio_url"]).optional(),
+    replyToId: z.string().uuid().optional(),
+    sharedItemType: z.enum(["post", "community", "profile"]).optional(),
+    sharedItemId: z.string().min(1).max(100).optional(),
+  })
+  .superRefine((value, context) => {
+    if (Boolean(value.sharedItemType) !== Boolean(value.sharedItemId)) {
+      context.addIssue({
+        code: "custom",
+        path: ["sharedItemId"],
+        message: "A shared item type and ID must be provided together.",
+      });
+    }
+    if (value.sharedItemType && (value.mediaUrl || value.body)) {
+      context.addIssue({
+        code: "custom",
+        path: ["sharedItemType"],
+        message: "A shared item must be sent as its own message.",
+      });
+    }
   })
   .refine(
     (value) =>
-      Boolean(value.body || value.mediaUrl) &&
+      Boolean(value.body || value.mediaUrl || value.sharedItemType) &&
       (!value.mediaKind || Boolean(value.mediaUrl)),
   );
+const editChatMessageSchema = z
+  .object({ body: z.string().trim().min(1).max(1000) })
+  .strict();
+const chatReactionSchema = z
+  .object({ emoji: z.string().trim().min(1).max(12) })
+  .strict();
+const chatTypingSchema = z.object({ typing: z.boolean() }).strict();
+const chatReactionQuerySchema = z.object({
+  emoji: z.string().trim().min(1).max(12),
+});
 const notificationReadSchema = z.object({ read: z.literal(true) });
 const notificationSettingsSchema = z
   .object({
@@ -3624,6 +3655,129 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       const mentionedUsernames = extractMentionUsernames(body.data.body).filter(
         (username) => username !== "everyone",
       );
+      let sharedItem: Record<string, unknown> | null = null;
+      if (body.data.sharedItemType === "post") {
+        const [item] = await database
+          .select({
+            id: posts.id,
+            body: posts.body,
+            kind: posts.kind,
+            url: posts.url,
+            authorUsername: profiles.username,
+            authorDisplayName: profiles.displayName,
+            authorAvatarUrl: profiles.avatarUrl,
+            communitySlug: communities.slug,
+            communityName: communities.name,
+            communityAvatarUrl: communities.avatarUrl,
+            voteCount: posts.voteCount,
+          })
+          .from(posts)
+          .innerJoin(communities, eq(communities.id, posts.communityId))
+          .innerJoin(users, eq(users.id, posts.authorId))
+          .innerJoin(profiles, eq(profiles.userId, users.id))
+          .where(
+            and(
+              eq(posts.id, body.data.sharedItemId!),
+              isNull(posts.deletedAt),
+              isNull(users.deletedAt),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
+            ),
+          )
+          .limit(1);
+        if (!item) {
+          return reply.code(404).send({
+            error: { code: "SHARED_POST_NOT_FOUND", message: "Post not found." },
+          });
+        }
+        sharedItem = item;
+      } else if (body.data.sharedItemType === "community") {
+        const [item] = await database
+          .select({
+            id: communities.id,
+            slug: communities.slug,
+            name: communities.name,
+            description: communities.description,
+            avatarUrl: communities.avatarUrl,
+            memberCount: sql<number>`(
+              select count(*)::int from ${communityMemberships} share_member
+              where share_member.community_id = ${communities.id}
+            )`,
+          })
+          .from(communities)
+          .where(
+            and(
+              eq(communities.slug, body.data.sharedItemId!),
+              eq(communities.isPublic, true),
+              eq(communities.status, "active"),
+            ),
+          )
+          .limit(1);
+        if (!item) {
+          return reply.code(404).send({
+            error: {
+              code: "SHARED_COMMUNITY_NOT_FOUND",
+              message: "Community not found.",
+            },
+          });
+        }
+        sharedItem = item;
+      } else if (body.data.sharedItemType === "profile") {
+        const [item] = await database
+          .select({
+            username: profiles.username,
+            displayName: profiles.displayName,
+            bio: profiles.bio,
+            avatarUrl: profiles.avatarUrl,
+            avatarColor: profiles.avatarColor,
+            initials: profiles.initials,
+            verified: profiles.isVerified,
+            followerCount: sql<number>`(
+              select count(*)::int from ${userFollows}
+              where ${userFollows.followedId} = ${profiles.userId}
+            )`,
+          })
+          .from(profiles)
+          .innerJoin(users, eq(users.id, profiles.userId))
+          .where(
+            and(
+              eq(profiles.username, body.data.sharedItemId!.toLowerCase()),
+              isNull(users.deletedAt),
+            ),
+          )
+          .limit(1);
+        if (!item) {
+          return reply.code(404).send({
+            error: { code: "SHARED_PROFILE_NOT_FOUND", message: "Profile not found." },
+          });
+        }
+        sharedItem = item;
+      }
+      let replyToBody: string | null = null;
+      if (body.data.replyToId) {
+        const [parent] = await database
+          .select({
+            id: communityChatMessages.id,
+            body: communityChatMessages.body,
+          })
+          .from(communityChatMessages)
+          .where(
+            and(
+              eq(communityChatMessages.id, body.data.replyToId),
+              eq(communityChatMessages.communityId, community.id),
+            ),
+          )
+          .limit(1);
+        if (!parent) {
+          return reply.code(404).send({
+            error: {
+              code: "CHAT_MESSAGE_NOT_FOUND",
+              message: "The message you are replying to could not be found.",
+            },
+          });
+        }
+        replyToBody = parent.body;
+      }
       const [message] = await database.transaction(async (transaction) => {
         const [createdMessage] = await transaction
           .insert(communityChatMessages)
@@ -3635,6 +3789,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             mediaKind:
               body.data.mediaKind ??
               (body.data.mediaUrl ? "image_url" : null),
+            replyToId: body.data.replyToId ?? null,
+            sharedItemType: body.data.sharedItemType ?? null,
+            sharedItemId: body.data.sharedItemId ?? null,
+            sharedItem,
           })
           .returning();
         if (createdMessage) {
@@ -3723,6 +3881,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(201).send({
         message: {
           ...message,
+          replyToBody,
+          reactions: [],
           author: {
             ...author,
             role: chatAuthorRole({
@@ -3733,6 +3893,276 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         },
       });
+    },
+  );
+
+  app.patch(
+    "/api/v1/communities/:slug/chat/messages/:id",
+    { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ ...slugParamsSchema.shape, id: z.string().uuid() })
+        .safeParse(request.params);
+      const body = editChatMessageSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      const [message] = await database
+        .select({
+          id: communityChatMessages.id,
+          authorId: communityChatMessages.authorId,
+          communityId: communityChatMessages.communityId,
+          replyToId: communityChatMessages.replyToId,
+          sharedItemType: communityChatMessages.sharedItemType,
+          sharedItemId: communityChatMessages.sharedItemId,
+          sharedItem: communityChatMessages.sharedItem,
+          mediaUrl: communityChatMessages.mediaUrl,
+          mediaKind: communityChatMessages.mediaKind,
+          createdAt: communityChatMessages.createdAt,
+        })
+        .from(communityChatMessages)
+        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
+        .innerJoin(communityMemberships, and(
+          eq(communityMemberships.communityId, communities.id),
+          eq(communityMemberships.userId, userId),
+        ))
+        .where(and(
+          eq(communityChatMessages.id, params.data.id),
+          eq(communities.slug, params.data.slug),
+          eq(communities.chatEnabled, true),
+        ))
+        .limit(1);
+      if (!message) {
+        return reply.code(404).send({
+          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+        });
+      }
+      if (message.authorId !== userId) {
+        return reply.code(403).send({
+          error: {
+            code: "CHAT_MESSAGE_AUTHOR_REQUIRED",
+            message: "Only the sender can edit this message.",
+          },
+        });
+      }
+      const now = new Date();
+      const [updated] = await database
+        .update(communityChatMessages)
+        .set({ body: body.data.body, editedAt: now })
+        .where(eq(communityChatMessages.id, message.id))
+        .returning();
+      if (!updated) throw new Error("Chat message could not be updated.");
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.message.updated",
+        communityId: message.communityId,
+        entityId: message.id,
+        payload: { messageId: message.id },
+      });
+      const [author] = await database
+        .select({
+          id: users.id,
+          username: profiles.username,
+          displayName: profiles.displayName,
+          avatarUrl: profiles.avatarUrl,
+          avatarVersion: profiles.avatarVersion,
+          initials: profiles.initials,
+          avatarColor: profiles.avatarColor,
+          verified: profiles.isVerified,
+          role: communityMemberships.role,
+        })
+        .from(users)
+        .innerJoin(profiles, eq(profiles.userId, users.id))
+        .innerJoin(communities, eq(communities.id, message.communityId))
+        .leftJoin(communityMemberships, and(
+          eq(communityMemberships.communityId, message.communityId),
+          eq(communityMemberships.userId, users.id),
+        ))
+        .where(eq(users.id, userId))
+        .limit(1);
+      return {
+        message: {
+          ...updated,
+          replyToBody: null,
+          reactions: [],
+          author: {
+            ...author,
+            role: chatAuthorRole({
+              userId,
+              creatorId: (await database
+                .select({ creatorId: communities.creatorId })
+                .from(communities)
+                .where(eq(communities.id, message.communityId))
+                .limit(1))[0]?.creatorId ?? "",
+              role: author?.role ?? "member",
+            }),
+          },
+        },
+      };
+    },
+  );
+
+  app.post(
+    "/api/v1/communities/:slug/chat/messages/:id/reactions",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ ...slugParamsSchema.shape, id: z.string().uuid() })
+        .safeParse(request.params);
+      const body = chatReactionSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      const [message] = await database
+        .select({
+          id: communityChatMessages.id,
+          communityId: communityChatMessages.communityId,
+        })
+        .from(communityChatMessages)
+        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
+        .innerJoin(communityMemberships, and(
+          eq(communityMemberships.communityId, communities.id),
+          eq(communityMemberships.userId, userId),
+        ))
+        .where(and(
+          eq(communityChatMessages.id, params.data.id),
+          eq(communities.slug, params.data.slug),
+          eq(communities.chatEnabled, true),
+        ))
+        .limit(1);
+      if (!message) {
+        return reply.code(404).send({
+          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+        });
+      }
+      await database.insert(communityChatMessageReactions).values({
+        messageId: message.id,
+        userId,
+        emoji: body.data.emoji,
+      }).onConflictDoNothing();
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.message.reaction",
+        communityId: message.communityId,
+        entityId: message.id,
+        payload: { messageId: message.id },
+      });
+      return {
+        reactions: await database
+          .select({
+            emoji: communityChatMessageReactions.emoji,
+            count: sql<number>`count(*)::int`,
+            reacted: sql<boolean>`bool_or(${communityChatMessageReactions.userId} = ${userId})`,
+          })
+          .from(communityChatMessageReactions)
+          .where(eq(communityChatMessageReactions.messageId, message.id))
+          .groupBy(communityChatMessageReactions.emoji),
+      };
+    },
+  );
+
+  app.delete(
+    "/api/v1/communities/:slug/chat/messages/:id/reactions",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ ...slugParamsSchema.shape, id: z.string().uuid() })
+        .safeParse(request.params);
+      const query = chatReactionQuerySchema.safeParse(request.query);
+      if (!params.success || !query.success) return invalidRequest(reply);
+      const [message] = await database
+        .select({
+          id: communityChatMessages.id,
+          communityId: communityChatMessages.communityId,
+        })
+        .from(communityChatMessages)
+        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
+        .innerJoin(communityMemberships, and(
+          eq(communityMemberships.communityId, communities.id),
+          eq(communityMemberships.userId, userId),
+        ))
+        .where(and(
+          eq(communityChatMessages.id, params.data.id),
+          eq(communities.slug, params.data.slug),
+          eq(communities.chatEnabled, true),
+        ))
+        .limit(1);
+      if (!message) {
+        return reply.code(404).send({
+          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+        });
+      }
+      await database.delete(communityChatMessageReactions).where(and(
+        eq(communityChatMessageReactions.messageId, message.id),
+        eq(communityChatMessageReactions.userId, userId),
+        eq(communityChatMessageReactions.emoji, query.data.emoji),
+      ));
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.message.reaction",
+        communityId: message.communityId,
+        entityId: message.id,
+        payload: { messageId: message.id },
+      });
+      return {
+        reactions: await database
+          .select({
+            emoji: communityChatMessageReactions.emoji,
+            count: sql<number>`count(*)::int`,
+            reacted: sql<boolean>`bool_or(${communityChatMessageReactions.userId} = ${userId})`,
+          })
+          .from(communityChatMessageReactions)
+          .where(eq(communityChatMessageReactions.messageId, message.id))
+          .groupBy(communityChatMessageReactions.emoji),
+      };
+    },
+  );
+
+  app.post(
+    "/api/v1/communities/:slug/chat/typing",
+    { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = slugParamsSchema.safeParse(request.params);
+      const body = chatTypingSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+      const [member] = await database
+        .select({
+          communityId: communities.id,
+          username: profiles.username,
+          displayName: profiles.displayName,
+        })
+        .from(communities)
+        .innerJoin(communityMemberships, and(
+          eq(communityMemberships.communityId, communities.id),
+          eq(communityMemberships.userId, userId),
+        ))
+        .innerJoin(profiles, eq(profiles.userId, userId))
+        .where(and(
+          eq(communities.slug, params.data.slug),
+          eq(communities.chatEnabled, true),
+          eq(communities.isPublic, true),
+          eq(communities.status, "active"),
+        ))
+        .limit(1);
+      if (!member) {
+        return reply.code(403).send({
+          error: { code: "MEMBERSHIP_REQUIRED", message: "Join this community to use its chat." },
+        });
+      }
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.typing",
+        communityId: member.communityId,
+        recipientId: userId,
+        entityId: userId,
+        payload: {
+          userId,
+          username: member.username,
+          displayName: member.displayName,
+          typing: body.data.typing,
+        },
+      });
+      return reply.code(204).send();
     },
   );
 
@@ -3849,18 +4279,33 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           ),
         )
         .limit(1);
-      if (
-        !canUseEveryoneMention({
+      const [targetMessage] = await database
+        .select({ id: communityChatMessages.id, authorId: communityChatMessages.authorId })
+        .from(communityChatMessages)
+        .where(and(
+          eq(communityChatMessages.id, params.data.id),
+          eq(communityChatMessages.communityId, community.id),
+        ))
+        .limit(1);
+      if (!targetMessage) {
+        return reply.code(404).send({
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
+        });
+      }
+      const canModerate =
+        canUseEveryoneMention({
           userId,
           creatorId: community.creatorId,
           role: membership?.role ?? "member",
-        }) &&
-        membership?.role !== "moderator"
-      ) {
+        }) || membership?.role === "moderator";
+      if (targetMessage.authorId !== userId && !canModerate) {
         return reply.code(403).send({
           error: {
-            code: "COMMUNITY_MODERATOR_REQUIRED",
-            message: "Community owner or moderator access is required.",
+            code: "CHAT_MESSAGE_DELETE_FORBIDDEN",
+            message: "Only the sender or a community moderator can delete this message.",
           },
         });
       }
@@ -3881,6 +4326,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.message.deleted",
+        communityId: community.id,
+        entityId: deleted.id,
+        payload: { messageId: deleted.id },
+      });
       return reply.code(204).send();
     },
   );
@@ -3908,6 +4359,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           id: communities.id,
           name: communities.name,
           slug: communities.slug,
+          chatEnabled: communities.chatEnabled,
         })
         .from(communities)
         .where(
@@ -3931,7 +4383,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       );
 
       const [membership] = await database
-        .select({ userId: communityMemberships.userId })
+        .select({
+          userId: communityMemberships.userId,
+          role: communityMemberships.role,
+        })
         .from(communityMemberships)
         .where(
           and(
@@ -3945,6 +4400,18 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           error: {
             code: "MEMBERSHIP_REQUIRED",
             message: "Join this community to post.",
+          },
+        });
+      }
+      if (
+        body.data.isNews &&
+        membership.role !== "owner" &&
+        membership.role !== "moderator"
+      ) {
+        return reply.code(403).send({
+          error: {
+            code: "COMMUNITY_MODERATOR_REQUIRED",
+            message: "Only community owners and moderators can publish news.",
           },
         });
       }
@@ -3995,6 +4462,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .select({
           username: profiles.username,
           displayName: profiles.displayName,
+          avatarUrl: profiles.avatarUrl,
         })
         .from(profiles)
         .where(eq(profiles.userId, userId))
@@ -4023,6 +4491,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             communityId: community.id,
             authorId: userId,
             kind: body.data.kind,
+            isNews: body.data.isNews,
             body: body.data.body,
             url,
             linkDomain: url ? new URL(url).hostname : null,
@@ -4035,6 +4504,40 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             entityId: post.id,
             payload: { postId: post.id },
           });
+          if (body.data.isNews && community.chatEnabled) {
+            const [chatMessage] = await transaction
+              .insert(communityChatMessages)
+              .values({
+                communityId: community.id,
+                authorId: userId,
+                body: "",
+                sharedItemType: "news",
+                sharedItemId: post.id,
+                sharedItem: {
+                  id: post.id,
+                  body: body.data.body,
+                  kind: body.data.kind,
+                  url,
+                  isNews: true,
+                  authorUsername: postAuthor?.username ?? "member",
+                  authorDisplayName:
+                    postAuthor?.displayName ?? "A community moderator",
+                  authorAvatarUrl: postAuthor?.avatarUrl ?? null,
+                  communitySlug: community.slug,
+                  communityName: community.name,
+                  voteCount: 0,
+                },
+              })
+              .returning({ id: communityChatMessages.id });
+            if (chatMessage) {
+              await transaction.insert(outboxEvents).values({
+                topic: "community.chat.message.created",
+                communityId: community.id,
+                entityId: chatMessage.id,
+                payload: { messageId: chatMessage.id },
+              });
+            }
+          }
           const eligibleCommunityMember = sql<boolean>`(
             ${communityMemberships.userId} is not null
             and coalesce(${notificationPreferences.communityPosts}, true)
@@ -4337,6 +4840,29 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           actorId: userId,
           communityId: post.communityId,
         });
+        const linkedNewsMessages = await transaction
+          .select({ id: communityChatMessages.id })
+          .from(communityChatMessages)
+          .where(
+            and(
+              eq(communityChatMessages.sharedItemType, "news"),
+              eq(communityChatMessages.sharedItemId, post.id),
+            ),
+          );
+        if (linkedNewsMessages.length > 0) {
+          const messageIds = linkedNewsMessages.map((message) => message.id);
+          await transaction
+            .delete(communityChatMessages)
+            .where(inArray(communityChatMessages.id, messageIds));
+          await transaction.insert(outboxEvents).values(
+            linkedNewsMessages.map((message) => ({
+              topic: "community.chat.message.deleted",
+              communityId: post.communityId,
+              entityId: message.id,
+              payload: { messageId: message.id },
+            })),
+          );
+        }
         await transaction.insert(outboxEvents).values({
           topic: "post.deleted",
           communityId: post.communityId,
@@ -5139,7 +5665,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       try {
         const chatMessageEvents = viewerId
           ? and(
-              eq(outboxEvents.topic, "community.chat.message.created"),
+              inArray(outboxEvents.topic, [
+                "community.chat.message.created",
+                "community.chat.message.updated",
+                "community.chat.message.deleted",
+                "community.chat.message.reaction",
+                "community.chat.typing",
+              ]),
               sql`exists (
                 select 1
                 from ${communityMemberships}

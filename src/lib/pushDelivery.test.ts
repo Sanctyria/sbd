@@ -50,6 +50,12 @@ describe("push delivery message", () => {
     expect(message).not.toHaveProperty("token");
     expect(message).not.toHaveProperty("notification");
     expect(message.android.priority).toBe("high");
+    expect(message.android.notification).toMatchObject({
+      title: "A reply",
+      body: "New activity",
+      channelId: "community_notifications",
+      sound: "default",
+    });
   });
 
   it("identifies replies to a user's reply without claiming the post", () => {

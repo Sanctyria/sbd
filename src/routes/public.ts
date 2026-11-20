@@ -26,6 +26,7 @@ import {
   bookmarks,
   communityBanners,
   communityChatMessages,
+  communityChatMessageReactions,
   communityChatPreferences,
   communities,
   communitySlugAliases,
@@ -96,6 +97,7 @@ const feedQuerySchema = pageQuerySchema
       .string()
       .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
       .optional(),
+    news: z.enum(["only", "exclude"]).optional(),
     username: z
       .string()
       .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/)
@@ -115,6 +117,13 @@ const feedQuerySchema = pageQuerySchema
         code: "custom",
         path: ["username"],
         message: "A username is required for the profile feed.",
+      });
+    }
+    if (query.news && query.scope !== "community") {
+      context.addIssue({
+        code: "custom",
+        path: ["news"],
+        message: "News filtering is only available for community feeds.",
       });
     }
     if (query.scope !== "community" && query.sort === "hot") {
@@ -167,6 +176,7 @@ type HotFeedCursor = {
 
 const moderatorSafePostFields = {
   kind: posts.kind,
+  isNews: posts.isNews,
   body: sql<string>`case when ${posts.deletedByModerator} then '' else ${posts.body} end`,
   url: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.url} end`,
   linkTitle: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkTitle} end`,
@@ -900,6 +910,32 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           body: communityChatMessages.body,
           mediaUrl: communityChatMessages.mediaUrl,
           mediaKind: communityChatMessages.mediaKind,
+          replyToId: communityChatMessages.replyToId,
+          replyToBody: sql<string | null>`(
+            select parent.body from ${communityChatMessages} parent
+            where parent.id = ${communityChatMessages.replyToId}
+          )`,
+          editedAt: communityChatMessages.editedAt,
+          sharedItemType: communityChatMessages.sharedItemType,
+          sharedItemId: communityChatMessages.sharedItemId,
+          sharedItem: communityChatMessages.sharedItem,
+          reactions: sql<
+            { emoji: string; count: number; reacted: boolean }[]
+          >`coalesce((
+            select json_agg(json_build_object(
+              'emoji', grouped.emoji,
+              'count', grouped.count,
+              'reacted', grouped.reacted
+            ))
+            from (
+              select ${communityChatMessageReactions.emoji} as emoji,
+                count(*)::int as count,
+                bool_or(${communityChatMessageReactions.userId} = ${viewerId}) as reacted
+              from ${communityChatMessageReactions}
+              where ${communityChatMessageReactions.messageId} = ${communityChatMessages.id}
+              group by ${communityChatMessageReactions.emoji}
+            ) grouped
+          ), '[]'::json)`,
           createdAt: communityChatMessages.createdAt,
           author: {
             id: users.id,
@@ -2048,6 +2084,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           ),
         )!,
       );
+    }
+    if (parsedQuery.data.news === "only") {
+      conditions.push(eq(posts.isNews, true));
+    } else if (parsedQuery.data.news === "exclude") {
+      conditions.push(eq(posts.isNews, false));
     }
     if (parsedQuery.data.scope === "profile" && parsedQuery.data.username) {
       conditions.push(eq(profiles.username, parsedQuery.data.username));

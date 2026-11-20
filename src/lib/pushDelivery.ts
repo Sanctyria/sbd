@@ -264,6 +264,12 @@ export function makeMessage(delivery: ClaimedDelivery) {
     android: {
       priority: "high" as const,
       ttl: 60 * 60 * 1000,
+      notification: {
+        title: data.title,
+        body: data.body,
+        channelId: "community_notifications",
+        sound: "default",
+      },
     },
     apns: {
       headers: { "apns-priority": "10" },

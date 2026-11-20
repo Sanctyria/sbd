@@ -17,6 +17,17 @@ describe("community mutation request schemas", () => {
     });
 
     expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.isNews).toBe(false);
+    }
+    expect(
+      postBodySchema.safeParse({
+        community: "worldbuilding",
+        kind: "text",
+        body: "A community announcement",
+        isNews: true,
+      }).success,
+    ).toBe(true);
   });
 
   it("accepts links and uploaded media post URLs", () => {
@@ -76,6 +87,35 @@ describe("community mutation request schemas", () => {
         mediaUrl: "https://res.cloudinary.com/demo/video/upload/audio.m4a",
       }).success,
     ).toBe(true);
+  });
+
+  it("accepts replies and rich item shares as valid chat messages", () => {
+    expect(
+      createChatMessageSchema.safeParse({
+        body: "Following up",
+        replyToId: "00000000-0000-4000-8000-000000000001",
+      }).success,
+    ).toBe(true);
+    for (const [sharedItemType, sharedItemId] of [
+      ["post", "00000000-0000-4000-8000-000000000002"],
+      ["community", "worldbuilding"],
+      ["profile", "mira"],
+    ]) {
+      expect(
+        createChatMessageSchema.safeParse({
+          body: "",
+          sharedItemType,
+          sharedItemId,
+        }).success,
+      ).toBe(true);
+    }
+    expect(
+      createChatMessageSchema.safeParse({
+        body: "extra text",
+        sharedItemType: "profile",
+        sharedItemId: "mira",
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts audio upload purposes only with a community", () => {

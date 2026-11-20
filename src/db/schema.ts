@@ -301,6 +301,11 @@ export const communityChatMessages = pgTable(
     body: text("body").notNull().default(""),
     mediaUrl: text("media_url"),
     mediaKind: text("media_kind"),
+    replyToId: uuid("reply_to_id"),
+    editedAt: timestamp("edited_at", { withTimezone: true }),
+    sharedItemType: text("shared_item_type"),
+    sharedItemId: text("shared_item_id"),
+    sharedItem: jsonb("shared_item").$type<Record<string, unknown> | null>(),
     createdAt: createdAt(),
   },
   (table) => [
@@ -313,6 +318,24 @@ export const communityChatMessages = pgTable(
       table.authorId,
       table.createdAt,
     ),
+  ],
+);
+
+export const communityChatMessageReactions = pgTable(
+  "community_chat_message_reactions",
+  {
+    messageId: uuid("message_id")
+      .notNull()
+      .references(() => communityChatMessages.id, { onDelete: "cascade" }),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    emoji: text("emoji").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.messageId, table.userId, table.emoji] }),
+    index("community_chat_message_reactions_message_idx").on(table.messageId),
   ],
 );
 
@@ -350,6 +373,7 @@ export const posts = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "restrict" }),
     kind: postKindEnum("kind").notNull().default("text"),
+    isNews: boolean("is_news").notNull().default(false),
     body: text("body").notNull(),
     url: text("url"),
     linkTitle: text("link_title"),
@@ -367,6 +391,12 @@ export const posts = pgTable(
   },
   (table) => [
     index("posts_feed_idx").on(table.communityId, table.createdAt, table.id),
+    index("posts_community_news_feed_idx").on(
+      table.communityId,
+      table.isNews,
+      table.createdAt,
+      table.id,
+    ),
     index("posts_public_feed_idx").on(table.createdAt, table.id),
     index("posts_author_idx").on(table.authorId, table.createdAt, table.id),
   ],

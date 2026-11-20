@@ -1,0 +1,2 @@
+ALTER TABLE "posts" ADD COLUMN "is_news" boolean DEFAULT false NOT NULL;--> statement-breakpoint
+CREATE INDEX "posts_community_news_feed_idx" ON "posts" USING btree ("community_id","is_news","created_at","id");
