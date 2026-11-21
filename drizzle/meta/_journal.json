@@ -225,6 +225,20 @@
       "when": 1795160872832,
       "tag": "0031_grant_named_profile_badges",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1795293253955,
+      "tag": "0032_natural_chat",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1795294597035,
+      "tag": "0033_tiresome_golden_guardian",
+      "breakpoints": true
     }
   ]
 }

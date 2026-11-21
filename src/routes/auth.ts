@@ -1,7 +1,7 @@
 import { randomBytes, createHash, randomUUID } from "node:crypto";
 import argon2 from "argon2";
 import { normalizeIP } from "@fastify/rate-limit";
-import { and, eq, gt, isNull, or } from "drizzle-orm";
+import { and, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { environment, type Environment } from "../config/env.js";
@@ -11,11 +11,18 @@ import {
   communityMemberships,
   profiles,
   pushDevices,
+  authEmailTokens,
+  userEmails,
   userCredentials,
   userSessions,
   users,
 } from "../db/schema.js";
 import { consumeAuthRateLimit, verifyTurnstile } from "../lib/authSecurity.js";
+import {
+  AccountEmailDeliveryError,
+  AccountEmailUnavailableError,
+  sendAccountEmail,
+} from "../lib/accountEmail.js";
 
 const sessionDurationMs = 30 * 24 * 60 * 60 * 1000;
 const dummyPasswordHash = argon2.hash(randomBytes(32).toString("base64url"), {
@@ -33,9 +40,20 @@ const signupSchema = z.object({
     .toLowerCase()
     .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/),
   displayName: z.string().trim().min(1).max(60),
+  email: z.string().trim().email().max(254),
   password: z.string().min(12).max(256),
   turnstileToken: z.string().min(1).max(2048).optional(),
 });
+const emailTokenSchema = z.object({ code: z.string().trim().min(32).max(128) });
+const passwordResetRequestSchema = z.object({
+  email: z.string().trim().email().max(254),
+});
+const passwordResetSchema = z.object({
+  code: z.string().trim().min(32).max(128),
+  password: z.string().min(12).max(256),
+});
+const emailSchema = z.object({ email: z.string().trim().email().max(254) });
+const emailTokenLifetimeMs = 20 * 60 * 1000;
 const pushDeviceSchema = z.object({
   token: z.string().trim().min(1).max(4096),
   platform: z.enum(["android", "ios"]),
@@ -43,6 +61,71 @@ const pushDeviceSchema = z.object({
 
 function hashSessionToken(token: string): string {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function hashEmailToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+async function createEmailToken(
+  userId: string,
+  purpose: "verify" | "password_reset",
+): Promise<string> {
+  const code = randomBytes(32).toString("base64url");
+  await database.transaction(async (transaction) => {
+    await transaction
+      .delete(authEmailTokens)
+      .where(
+        and(
+          eq(authEmailTokens.userId, userId),
+          eq(authEmailTokens.purpose, purpose),
+        ),
+      );
+    await transaction.insert(authEmailTokens).values({
+      tokenHash: hashEmailToken(code),
+      userId,
+      purpose,
+      expiresAt: new Date(Date.now() + emailTokenLifetimeMs),
+    });
+  });
+  return code;
+}
+
+function emailServiceUnavailable(reply: FastifyReply) {
+  return reply.code(503).send({
+    error: {
+      code: "EMAIL_DELIVERY_UNAVAILABLE",
+      message: "Email delivery is temporarily unavailable. Try again later.",
+    },
+  });
+}
+
+function invalidAuthRequest(reply: FastifyReply) {
+  return reply.code(400).send({
+    error: { code: "INVALID_REQUEST", message: "The request is invalid." },
+  });
+}
+
+async function currentSessionUserId(
+  request: FastifyRequest,
+  config: Environment,
+): Promise<string | null> {
+  const sessionToken = request.cookies[config.SESSION_COOKIE_NAME];
+  if (!sessionToken) return null;
+  const [session] = await database
+    .select({ userId: userSessions.userId })
+    .from(userSessions)
+    .innerJoin(users, eq(users.id, userSessions.userId))
+    .where(
+      and(
+        eq(userSessions.tokenHash, hashSessionToken(sessionToken)),
+        gt(userSessions.expiresAt, new Date()),
+        isNull(users.deletedAt),
+        isNull(users.suspendedAt),
+      ),
+    )
+    .limit(1);
+  return session?.userId ?? null;
 }
 
 function cookieOptions(config: Environment) {
@@ -107,6 +190,9 @@ export async function authRoutes(
         });
       }
 
+      if (!config.RESEND_API_KEY || !config.AUTH_EMAIL_FROM) {
+        return emailServiceUnavailable(reply);
+      }
       const username = parsedBody.data.username;
       if (
         !(await consumeAuthRateLimit(
@@ -147,6 +233,7 @@ export async function authRoutes(
 
       const userId = randomUUID();
       const token = randomBytes(32).toString("base64url");
+      const emailCode = randomBytes(32).toString("base64url");
       const expiresAt = new Date(Date.now() + sessionDurationMs);
       const passwordHash = await argon2.hash(parsedBody.data.password, {
         type: argon2.argon2id,
@@ -174,6 +261,16 @@ export async function authRoutes(
             userId,
             passwordHash,
           });
+          await transaction.insert(userEmails).values({
+            userId,
+            email: parsedBody.data.email.trim().toLowerCase(),
+          });
+          await transaction.insert(authEmailTokens).values({
+            tokenHash: hashEmailToken(emailCode),
+            userId,
+            purpose: "verify",
+            expiresAt: new Date(Date.now() + emailTokenLifetimeMs),
+          });
           await transaction.insert(userSessions).values({
             tokenHash: hashSessionToken(token),
             userId,
@@ -181,6 +278,24 @@ export async function authRoutes(
           });
           return user;
         });
+
+        try {
+          await sendAccountEmail(
+            config,
+            parsedBody.data.email.trim().toLowerCase(),
+            "verify",
+            emailCode,
+          );
+        } catch (error) {
+          if (
+            error instanceof AccountEmailUnavailableError ||
+            error instanceof AccountEmailDeliveryError
+          ) {
+            await database.delete(users).where(eq(users.id, userId));
+            return emailServiceUnavailable(reply);
+          }
+          throw error;
+        }
 
         reply.setCookie(config.SESSION_COOKIE_NAME, token, {
           ...cookieOptions(config),
@@ -193,6 +308,7 @@ export async function authRoutes(
             displayName: parsedBody.data.displayName,
             initials,
             avatarColor: "#cf6f65",
+            emailVerificationRequired: true,
           },
         });
       } catch (error) {
@@ -202,6 +318,14 @@ export async function authRoutes(
           "code" in error &&
           error.code === "23505"
         ) {
+          if ("constraint" in error && error.constraint === "user_emails_email_uidx") {
+            return reply.code(409).send({
+              error: {
+                code: "EMAIL_ALREADY_IN_USE",
+                message: "That email address is already associated with an account.",
+              },
+            });
+          }
           return reply.code(409).send({
             error: {
               code: "USERNAME_TAKEN",
@@ -211,6 +335,198 @@ export async function authRoutes(
         }
         throw error;
       }
+    },
+  );
+
+  app.post(
+    "/api/v1/auth/email/verify",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (!hasAllowedOrigin(request, reply, config)) return;
+      const body = emailTokenSchema.safeParse(request.body);
+      if (!body.success) return invalidAuthRequest(reply);
+      const [token] = await database
+        .select({ userId: authEmailTokens.userId })
+        .from(authEmailTokens)
+        .where(
+          and(
+            eq(authEmailTokens.tokenHash, hashEmailToken(body.data.code)),
+            eq(authEmailTokens.purpose, "verify"),
+            gt(authEmailTokens.expiresAt, new Date()),
+          ),
+        )
+        .limit(1);
+      if (!token) {
+        return reply.code(400).send({
+          error: {
+            code: "EMAIL_CODE_INVALID",
+            message: "That verification code is invalid or expired.",
+          },
+        });
+      }
+      const verified = await database.transaction(async (transaction) => {
+        const [consumed] = await transaction
+          .delete(authEmailTokens)
+          .where(
+            and(
+              eq(
+                authEmailTokens.tokenHash,
+                hashEmailToken(body.data.code),
+              ),
+              eq(authEmailTokens.purpose, "verify"),
+              gt(authEmailTokens.expiresAt, new Date()),
+            ),
+          )
+          .returning({ userId: authEmailTokens.userId });
+        if (!consumed) return false;
+        await transaction
+          .update(userEmails)
+          .set({ verifiedAt: new Date(), updatedAt: new Date() })
+          .where(eq(userEmails.userId, consumed.userId));
+        return true;
+      });
+      if (!verified) {
+        return reply.code(400).send({
+          error: {
+            code: "EMAIL_CODE_INVALID",
+            message: "That verification code is invalid or expired.",
+          },
+        });
+      }
+      return reply.code(204).send();
+    },
+  );
+
+  app.post(
+    "/api/v1/auth/password-reset/request",
+    { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (!hasAllowedOrigin(request, reply, config)) return;
+      const body = passwordResetRequestSchema.safeParse(request.body);
+      if (!body.success) return invalidAuthRequest(reply);
+      const normalizedEmail = body.data.email.trim().toLowerCase();
+      if (
+        !(await consumeAuthRateLimit(
+          "password_reset",
+          [
+            `ip:${normalizeIP(request.ip)}`,
+            `email:${normalizedEmail}`,
+          ],
+          [5, 3],
+          15 * 60 * 1_000,
+        ))
+      ) {
+        return reply.code(429).send({
+          error: {
+            code: "RATE_LIMITED",
+            message: "Too many recovery requests. Try again later.",
+          },
+        });
+      }
+      const [account] = await database
+        .select({ userId: userEmails.userId })
+        .from(userEmails)
+        .innerJoin(users, eq(users.id, userEmails.userId))
+        .where(
+          and(
+            sql`lower(${userEmails.email}) = ${normalizedEmail}`,
+            isNotNull(userEmails.verifiedAt),
+            isNull(users.deletedAt),
+            isNull(users.suspendedAt),
+          ),
+        )
+        .limit(1);
+      if (account) {
+        const code = await createEmailToken(account.userId, "password_reset");
+        try {
+          await sendAccountEmail(
+            config,
+            normalizedEmail,
+            "password_reset",
+            code,
+          );
+        } catch (error) {
+          if (
+            error instanceof AccountEmailUnavailableError ||
+            error instanceof AccountEmailDeliveryError
+          ) {
+            return emailServiceUnavailable(reply);
+          }
+          throw error;
+        }
+      }
+      return reply.code(202).send({
+        message:
+          "If an account has a verified email with us, a recovery code has been sent.",
+      });
+    },
+  );
+
+  app.post(
+    "/api/v1/auth/password-reset/confirm",
+    { config: { rateLimit: { max: 10, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (!hasAllowedOrigin(request, reply, config)) return;
+      const body = passwordResetSchema.safeParse(request.body);
+      if (!body.success) return invalidAuthRequest(reply);
+      const tokenHash = hashEmailToken(body.data.code);
+      const [token] = await database
+        .select({ userId: authEmailTokens.userId })
+        .from(authEmailTokens)
+        .where(
+          and(
+            eq(authEmailTokens.tokenHash, tokenHash),
+            eq(authEmailTokens.purpose, "password_reset"),
+            gt(authEmailTokens.expiresAt, new Date()),
+          ),
+        )
+        .limit(1);
+      if (!token) {
+        return reply.code(400).send({
+          error: {
+            code: "PASSWORD_RESET_CODE_INVALID",
+            message: "That recovery code is invalid or expired.",
+          },
+        });
+      }
+      const passwordHash = await argon2.hash(body.data.password, {
+        type: argon2.argon2id,
+      });
+      const reset = await database.transaction(async (transaction) => {
+        const [consumed] = await transaction
+          .delete(authEmailTokens)
+          .where(
+            and(
+              eq(authEmailTokens.tokenHash, tokenHash),
+              gt(authEmailTokens.expiresAt, new Date()),
+            ),
+          )
+          .returning({ userId: authEmailTokens.userId });
+        if (!consumed) return false;
+        await transaction
+          .update(userCredentials)
+          .set({ passwordHash, updatedAt: new Date() })
+          .where(eq(userCredentials.userId, consumed.userId));
+        await transaction
+          .delete(userSessions)
+          .where(eq(userSessions.userId, consumed.userId));
+        await transaction
+          .delete(authEmailTokens)
+          .where(eq(authEmailTokens.userId, consumed.userId));
+        return true;
+      });
+      if (!reset) {
+        return reply.code(400).send({
+          error: {
+            code: "PASSWORD_RESET_CODE_INVALID",
+            message: "That recovery code is invalid or expired.",
+          },
+        });
+      }
+      return reply.code(204).send();
     },
   );
 
@@ -404,6 +720,146 @@ export async function authRoutes(
       },
     };
   });
+
+  app.get("/api/v1/me/email", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    const userId = await currentSessionUserId(request, config);
+    if (!userId) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+    const [email] = await database
+      .select({
+        email: userEmails.email,
+        verifiedAt: userEmails.verifiedAt,
+      })
+      .from(userEmails)
+      .where(eq(userEmails.userId, userId))
+      .limit(1);
+    return {
+      email: email?.email ?? null,
+      verified: email?.verifiedAt != null,
+    };
+  });
+
+  app.put(
+    "/api/v1/me/email",
+    { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (!hasAllowedOrigin(request, reply, config)) return;
+      const userId = await currentSessionUserId(request, config);
+      if (!userId) {
+        return reply.code(401).send({
+          error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+        });
+      }
+      if (!config.RESEND_API_KEY || !config.AUTH_EMAIL_FROM) {
+        return emailServiceUnavailable(reply);
+      }
+      const body = emailSchema.safeParse(request.body);
+      if (!body.success) return invalidAuthRequest(reply);
+      const email = body.data.email.trim().toLowerCase();
+      const code = randomBytes(32).toString("base64url");
+      try {
+        await database.transaction(async (transaction) => {
+          await transaction
+            .insert(userEmails)
+            .values({ userId, email })
+            .onConflictDoUpdate({
+              target: userEmails.userId,
+              set: { email, verifiedAt: null, updatedAt: new Date() },
+            });
+          await transaction
+            .delete(authEmailTokens)
+            .where(
+              and(
+                eq(authEmailTokens.userId, userId),
+                eq(authEmailTokens.purpose, "verify"),
+              ),
+            );
+          await transaction.insert(authEmailTokens).values({
+            tokenHash: hashEmailToken(code),
+            userId,
+            purpose: "verify",
+            expiresAt: new Date(Date.now() + emailTokenLifetimeMs),
+          });
+        });
+      } catch (error) {
+        if (
+          typeof error === "object" &&
+          error !== null &&
+          "code" in error &&
+          error.code === "23505"
+        ) {
+          return reply.code(409).send({
+            error: {
+              code: "EMAIL_ALREADY_IN_USE",
+              message: "That email address is already associated with an account.",
+            },
+          });
+        }
+        throw error;
+      }
+      try {
+        await sendAccountEmail(config, email, "verify", code);
+      } catch (error) {
+        if (
+          error instanceof AccountEmailUnavailableError ||
+          error instanceof AccountEmailDeliveryError
+        ) {
+          return emailServiceUnavailable(reply);
+        }
+        throw error;
+      }
+      return reply.code(202).send({ message: "Verification code sent." });
+    },
+  );
+
+  app.post(
+    "/api/v1/me/email/verify/resend",
+    { config: { rateLimit: { max: 5, timeWindow: "15 minutes" } } },
+    async (request, reply) => {
+      reply.header("cache-control", "no-store");
+      if (!hasAllowedOrigin(request, reply, config)) return;
+      const userId = await currentSessionUserId(request, config);
+      if (!userId) {
+        return reply.code(401).send({
+          error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+        });
+      }
+      if (!config.RESEND_API_KEY || !config.AUTH_EMAIL_FROM) {
+        return emailServiceUnavailable(reply);
+      }
+      const [email] = await database
+        .select({ email: userEmails.email, verifiedAt: userEmails.verifiedAt })
+        .from(userEmails)
+        .where(eq(userEmails.userId, userId))
+        .limit(1);
+      if (!email || email.verifiedAt) {
+        return reply.code(409).send({
+          error: {
+            code: "EMAIL_VERIFICATION_NOT_AVAILABLE",
+            message: "There is no unverified email address to verify.",
+          },
+        });
+      }
+      const code = await createEmailToken(userId, "verify");
+      try {
+        await sendAccountEmail(config, email.email, "verify", code);
+      } catch (error) {
+        if (
+          error instanceof AccountEmailUnavailableError ||
+          error instanceof AccountEmailDeliveryError
+        ) {
+          return emailServiceUnavailable(reply);
+        }
+        throw error;
+      }
+      return reply.code(202).send({ message: "Verification code sent." });
+    },
+  );
 
   app.delete("/api/v1/auth/session", async (request, reply) => {
     if (!hasAllowedOrigin(request, reply, config)) return;

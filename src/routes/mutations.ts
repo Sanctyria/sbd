@@ -10,6 +10,7 @@ import {
   isNotNull,
   isNull,
   ne,
+  not,
   lt,
   or,
   sql,
@@ -228,6 +229,7 @@ const chatReactionSchema = z
   .object({ emoji: z.string().trim().min(1).max(12) })
   .strict();
 const chatTypingSchema = z.object({ typing: z.boolean() }).strict();
+const chatPinSchema = z.object({ pinned: z.boolean() }).strict();
 const chatReactionQuerySchema = z.object({
   emoji: z.string().trim().min(1).max(12),
 });
@@ -3979,6 +3981,79 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
   );
 
   app.patch(
+    "/api/v1/communities/:slug/chat/messages/:id/pin",
+    { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ ...slugParamsSchema.shape, id: z.string().uuid() })
+        .safeParse(request.params);
+      const body = chatPinSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+
+      const [community] = await database
+        .select({ id: communities.id, creatorId: communities.creatorId })
+        .from(communities)
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
+        .limit(1);
+      if (!community) {
+        return reply.code(404).send({
+          error: { code: "COMMUNITY_NOT_FOUND", message: "Community not found." },
+        });
+      }
+      const [membership] = await database
+        .select({ role: communityMemberships.role })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, community.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .limit(1);
+      if (
+        !membership ||
+        (membership.role !== "owner" &&
+          membership.role !== "moderator" &&
+          community.creatorId !== userId)
+      ) {
+        return reply.code(403).send({
+          error: { code: "COMMUNITY_MODERATOR_REQUIRED", message: "Only owners and moderators can pin chat messages." },
+        });
+      }
+      const [message] = await database
+        .update(communityChatMessages)
+        .set({ pinnedAt: body.data.pinned ? new Date() : null })
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communityChatMessages.communityId, community.id),
+          ),
+        )
+        .returning({ id: communityChatMessages.id, pinnedAt: communityChatMessages.pinnedAt });
+      if (!message) {
+        return reply.code(404).send({
+          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+        });
+      }
+      await database.insert(outboxEvents).values({
+        topic: "community.chat.message.updated",
+        communityId: community.id,
+        entityId: message.id,
+        payload: { messageId: message.id, isPinned: body.data.pinned },
+      });
+      return { message: { id: message.id, isPinned: body.data.pinned } };
+    },
+  );
+
+  app.patch(
     "/api/v1/communities/:slug/chat/messages/:id",
     { config: { rateLimit: { max: 30, timeWindow: "1 minute" } } },
     async (request, reply) => {
@@ -4620,6 +4695,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               });
             }
           }
+          const mentionedUsernames = extractMentionUsernames(body.data.body);
           const eligibleCommunityMember = sql<boolean>`(
             ${communityMemberships.userId} is not null
             and coalesce(${notificationPreferences.communityPosts}, true)
@@ -4670,6 +4746,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                 ne(profiles.userId, userId),
                 isNull(users.deletedAt),
                 isNull(users.suspendedAt),
+                mentionedUsernames.length
+                  ? not(inArray(profiles.username, mentionedUsernames))
+                  : undefined,
                 sql`not exists (
                   select 1
                   from ${userBlocks}
@@ -4677,6 +4756,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                     and ${userBlocks.blockedId} = ${userId})
                     or (${userBlocks.blockerId} = ${userId}
                     and ${userBlocks.blockedId} = ${profiles.userId})
+                )`,
+                sql`not exists (
+                  select 1
+                  from ${userMutes}
+                  where ${userMutes.muterId} = ${profiles.userId}
+                    and ${userMutes.mutedId} = ${userId}
                 )`,
                 or(eligibleCommunityMember, eligibleFollower),
               ),
@@ -4732,7 +4817,6 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               );
             }
           }
-          const mentionedUsernames = extractMentionUsernames(body.data.body);
           if (mentionedUsernames.length) {
             const mentionedProfiles = await transaction
               .select({ recipientId: profiles.userId })
@@ -4742,6 +4826,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                 and(
                   inArray(profiles.username, mentionedUsernames),
                   isNull(users.deletedAt),
+                  sql`not exists (
+                    select 1
+                    from ${userMutes}
+                    where ${userMutes.muterId} = ${profiles.userId}
+                      and ${userMutes.mutedId} = ${userId}
+                  )`,
                 ),
               );
             const recipients = await filterEnabledNotificationRecipients(

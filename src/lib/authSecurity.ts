@@ -7,7 +7,7 @@ import { authRateLimits } from "../db/schema.js";
 const authRateLimitWindowMs = 24 * 60 * 60 * 1_000;
 
 export async function consumeAuthRateLimit(
-  action: "signup" | "login",
+  action: "signup" | "login" | "password_reset" | "email_verify",
   buckets: string[],
   limits: number[],
   windowMs: number,

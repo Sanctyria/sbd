@@ -39,6 +39,7 @@ The backend is a standalone Fastify service that powers the Sanctyria community 
    ```
 
    Set `DATABASE_URL` to your local PostgreSQL connection. The `.env` file is ignored by Git.
+   Configure `RESEND_API_KEY` and `AUTH_EMAIL_FROM` to enable signup email verification and password recovery. Both settings must be provided together; use a sender address verified with Resend.
 
 3. Start the local database from this directory:
 
@@ -87,6 +88,8 @@ Configuration is loaded from environment variables and validated at startup.
 | `DATABASE_URL`              | Yes      | —                       | PostgreSQL connection URL.                                                            |
 | `SESSION_COOKIE_NAME`       | No       | `sanctyria_session`     | Name of the HTTP-only session cookie.                                                 |
 | `SESSION_COOKIE_SECURE`     | No       | Environment-dependent   | Set `true` behind HTTPS; use `false` only for local HTTP development.                 |
+| `RESEND_API_KEY`            | No       | Empty                   | Resend API key for account verification and password-recovery messages. Store only in backend secrets. |
+| `AUTH_EMAIL_FROM`           | No       | Empty                   | Verified sender address for account emails; configure together with `RESEND_API_KEY`. |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | No   | Empty                   | Firebase Admin service-account JSON; enables the push-delivery worker. Keep it in a deployment secret manager. |
 | `GOOGLE_APPLICATION_CREDENTIALS` | No  | Empty                   | Path to a mounted service-account JSON file; enables the worker via Application Default Credentials. |
 | `CLOUDINARY_CLOUD_NAME`     | No       | —                       | Cloudinary cloud name for signed uploads. Configure together with the API key and secret. |

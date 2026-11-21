@@ -21,6 +21,14 @@ const environmentSchema = z
       .pipe(z.array(z.string().min(1))),
     SESSION_COOKIE_NAME: z.string().min(1).default("sanctyria_session"),
     SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
+    RESEND_API_KEY: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().trim().min(1).optional(),
+    ),
+    AUTH_EMAIL_FROM: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.string().trim().email().optional(),
+    ),
     FIREBASE_SERVICE_ACCOUNT_JSON: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
@@ -124,6 +132,14 @@ const environmentSchema = z
     DATABASE_URL: z.string().url(),
   })
   .superRefine((value, context) => {
+    if (Boolean(value.RESEND_API_KEY) !== Boolean(value.AUTH_EMAIL_FROM)) {
+      context.addIssue({
+        code: "custom",
+        path: ["AUTH_EMAIL_FROM"],
+        message:
+          "Configure both the Resend API key and verified sender email to enable account recovery.",
+      });
+    }
     const cloudinaryCredentials = [
       value.CLOUDINARY_CLOUD_NAME,
       value.CLOUDINARY_API_KEY,

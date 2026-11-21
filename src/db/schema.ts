@@ -88,6 +88,37 @@ export const userCredentials = pgTable("user_credentials", {
   updatedAt: updatedAt(),
 });
 
+export const userEmails = pgTable(
+  "user_emails",
+  {
+    userId: uuid("user_id")
+      .primaryKey()
+      .references(() => users.id, { onDelete: "cascade" }),
+    email: text("email").notNull(),
+    verifiedAt: timestamp("verified_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [uniqueIndex("user_emails_email_uidx").on(sql`lower(${table.email})`)],
+);
+
+export const authEmailTokens = pgTable(
+  "auth_email_tokens",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    purpose: text("purpose").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("auth_email_tokens_user_purpose_idx").on(table.userId, table.purpose),
+    index("auth_email_tokens_expiry_idx").on(table.expiresAt),
+  ],
+);
+
 export const userSessions = pgTable(
   "user_sessions",
   {
@@ -321,6 +352,7 @@ export const communityChatMessages = pgTable(
     sharedItemType: text("shared_item_type"),
     sharedItemId: text("shared_item_id"),
     sharedItem: jsonb("shared_item").$type<Record<string, unknown> | null>(),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
     createdAt: createdAt(),
   },
   (table) => [

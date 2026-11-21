@@ -755,6 +755,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(401).send({
         error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
       });
+
     }
 
     const items = await database
@@ -847,6 +848,30 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         ),
         desc(communities.updatedAt),
       );
+    reply.header("cache-control", "private, no-store");
+    return { items };
+  });
+
+  app.get("/api/v1/me/blocks", async (request, reply) => {
+    const viewerId = await currentViewerId(request);
+    if (!viewerId) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+    const items = await database
+      .select({
+        username: profiles.username,
+        displayName: profiles.displayName,
+        initials: profiles.initials,
+        avatarColor: profiles.avatarColor,
+        avatarUrl: profiles.avatarUrl,
+      })
+      .from(userBlocks)
+      .innerJoin(users, eq(users.id, userBlocks.blockedId))
+      .innerJoin(profiles, eq(profiles.userId, users.id))
+      .where(and(eq(userBlocks.blockerId, viewerId), isNull(users.deletedAt)))
+      .orderBy(desc(userBlocks.createdAt), desc(profiles.username));
     reply.header("cache-control", "private, no-store");
     return { items };
   });
@@ -967,6 +992,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           sharedItemType: communityChatMessages.sharedItemType,
           sharedItemId: communityChatMessages.sharedItemId,
           sharedItem: communityChatMessages.sharedItem,
+          isPinned: sql<boolean>`${communityChatMessages.pinnedAt} is not null`,
           reactions: sql<
             { emoji: string; count: number; reacted: boolean }[]
           >`coalesce((
@@ -1016,6 +1042,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )
         .where(and(...conditions, isNull(users.deletedAt)))
         .orderBy(
+          desc(sql`case when ${communityChatMessages.pinnedAt} is not null then 1 else 0 end`),
           desc(communityChatMessages.createdAt),
           desc(communityChatMessages.id),
         )

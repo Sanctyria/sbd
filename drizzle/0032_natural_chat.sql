@@ -1,0 +1,1 @@
+ALTER TABLE "community_chat_messages" ADD COLUMN "pinned_at" timestamp with time zone;
