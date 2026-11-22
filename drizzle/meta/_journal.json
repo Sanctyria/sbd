@@ -239,6 +239,20 @@
       "when": 1795294597035,
       "tag": "0033_tiresome_golden_guardian",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "7",
+      "when": 1795357470141,
+      "tag": "0034_numerous_argent",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1795358979972,
+      "tag": "0035_lush_randall",
+      "breakpoints": true
     }
   ]
 }

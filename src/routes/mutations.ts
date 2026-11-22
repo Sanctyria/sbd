@@ -92,6 +92,29 @@ const POST_CREATION_COOLDOWN_SECONDS = 60;
 const REPLY_CREATION_COOLDOWN_SECONDS = 15;
 let activeEventStreamCount = 0;
 
+async function recordDailyActivityStreak(
+  transaction: DatabaseTransaction,
+  userId: string,
+): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  const nextStreak = sql<number>`case
+    when ${users.lastActivityDate} = ${today}::date
+      then ${users.activityStreak}
+    when ${users.lastActivityDate} = (${today}::date - 1)
+      then ${users.activityStreak} + 1
+    else 1
+  end`;
+  await transaction
+    .update(users)
+    .set({
+      activityStreak: nextStreak,
+      bestActivityStreak: sql`greatest(${users.bestActivityStreak}, ${nextStreak})`,
+      lastActivityDate: sql`${today}::date`,
+      updatedAt: new Date(),
+    })
+    .where(eq(users.id, userId));
+}
+
 const idParamsSchema = z.object({ id: z.string().uuid() });
 const postPinParamsSchema = z.object({
   id: z.string().uuid(),
@@ -138,8 +161,16 @@ export const postBodySchema = z
     isNews: z.boolean().default(false),
     body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
     url: httpsUrlSchema.nullable().optional(),
+    audioCoverUrl: httpsUrlSchema.nullable().optional(),
   })
   .superRefine((value, context) => {
+    if (value.audioCoverUrl && value.kind !== "audio_url") {
+      context.addIssue({
+        code: "custom",
+        path: ["audioCoverUrl"],
+        message: "Cover images can only be added to audio posts.",
+      });
+    }
     if (!value.body && !value.url) {
       context.addIssue({
         code: "custom",
@@ -252,6 +283,7 @@ export const communityChatNotificationSchema = z
 const moderationQueueQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
+  community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
   status: z
     .enum(["open", "reviewing", "resolved", "dismissed"])
     .default("open"),
@@ -259,6 +291,7 @@ const moderationQueueQuerySchema = z.object({
 const moderationHistoryQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
+  community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
 });
 const moderationDecisionSchema = z
   .object({
@@ -284,6 +317,7 @@ const profileUpdateSchema = z
 const createCommunitySchema = z.object({
   name: z.string().trim().min(3).max(60),
   description: z.string().trim().max(500).default(""),
+  postsPrivate: z.boolean().default(false),
 });
 const updateCommunitySchema = z
   .object({
@@ -293,6 +327,7 @@ const updateCommunitySchema = z
     bannerUrl: communityImageSchema.nullable().optional(),
     websiteUrl: httpsUrlSchema.nullable().optional(),
     chatEnabled: z.boolean().optional(),
+    postsPrivate: z.boolean().optional(),
   })
   .refine((value) => Object.keys(value).length > 0);
 const ownerTransferSchema = z.object({
@@ -328,12 +363,19 @@ async function cleanupPostCloudinaryAssets(
   authorId: string,
   communityId: string,
   mediaUrl: string | null,
+  audioCoverUrl: string | null = null,
 ): Promise<void> {
   await cleanupCloudinaryAsset(
     request,
     mediaUrl,
     `sanctyria/users/${authorId}/posts/${communityId}`,
     "post media",
+  );
+  await cleanupCloudinaryAsset(
+    request,
+    audioCoverUrl,
+    `sanctyria/users/${authorId}/posts/${communityId}`,
+    "audio cover",
   );
   const replyAssets = await database
     .select({
@@ -684,12 +726,22 @@ function invalidCursor(reply: FastifyReply) {
   });
 }
 
-async function activePostCommunityId(postId: string): Promise<string | null> {
+async function activePostCommunityId(
+  postId: string,
+  userId: string,
+): Promise<string | null> {
   const [post] = await database
     .select({ communityId: posts.communityId })
     .from(posts)
     .innerJoin(communities, eq(communities.id, posts.communityId))
     .innerJoin(users, eq(users.id, posts.authorId))
+    .leftJoin(
+      communityMemberships,
+      and(
+        eq(communityMemberships.communityId, posts.communityId),
+        eq(communityMemberships.userId, userId),
+      ),
+    )
     .where(
       and(
         eq(posts.id, postId),
@@ -697,6 +749,10 @@ async function activePostCommunityId(postId: string): Promise<string | null> {
         isNull(users.deletedAt),
         eq(communities.isPublic, true),
         eq(communities.status, "active"),
+        or(
+          eq(communities.postsPrivate, false),
+          eq(communityMemberships.userId, userId),
+        ),
       ),
     )
     .limit(1);
@@ -713,6 +769,7 @@ async function manageablePost(userId: string, postId: string) {
       kind: posts.kind,
       body: posts.body,
       url: posts.url,
+      audioCoverUrl: posts.audioCoverUrl,
       role: communityMemberships.role,
     })
     .from(posts)
@@ -732,6 +789,10 @@ async function manageablePost(userId: string, postId: string) {
         isNull(users.deletedAt),
         eq(communities.isPublic, true),
         eq(communities.status, "active"),
+        or(
+          eq(communities.postsPrivate, false),
+          eq(communityMemberships.userId, userId),
+        ),
       ),
     )
     .limit(1);
@@ -772,7 +833,19 @@ async function manageableReply(userId: string, replyId: string) {
         isNull(replies.deletedAt),
         isNull(posts.deletedAt),
         eq(communities.isPublic, true),
+        or(
+          eq(communities.postsPrivate, false),
+          sql`exists (
+            select 1 from ${communityMemberships}
+            where ${communityMemberships.communityId} = ${posts.communityId}
+              and ${communityMemberships.userId} = ${userId}
+          )`,
+        ),
         eq(communities.status, "active"),
+        or(
+          eq(communities.postsPrivate, false),
+          eq(communityMemberships.userId, userId),
+        ),
       ),
     )
     .limit(1);
@@ -786,13 +859,34 @@ async function manageableReply(userId: string, replyId: string) {
   return target;
 }
 
+async function moderatorCommunityOptions(userId: string) {
+  return database
+    .select({
+      id: communities.id,
+      slug: communities.slug,
+      name: communities.name,
+    })
+    .from(communityMemberships)
+    .innerJoin(
+      communities,
+      eq(communities.id, communityMemberships.communityId),
+    )
+    .where(
+      and(
+        eq(communityMemberships.userId, userId),
+        inArray(communityMemberships.role, ["owner", "moderator"]),
+        eq(communities.status, "active"),
+      ),
+    );
+}
+
 async function moderatorForReportTarget(
   userId: string,
   targetType: string,
   targetId: string,
-): Promise<{ communityId: string; postId: string } | null> {
+): Promise<{ communityId: string; postId: string | null } | null> {
   let communityId: string | null = null;
-  let postId = targetId;
+  let postId: string | null = targetId;
   if (targetType === "post") {
     const [target] = await database
       .select({ communityId: posts.communityId, postId: posts.id })
@@ -824,6 +918,20 @@ async function moderatorForReportTarget(
       .limit(1);
     communityId = target?.communityId ?? null;
     postId = target?.postId ?? targetId;
+  } else if (targetType === "community") {
+    const [target] = await database
+      .select({ id: communities.id })
+      .from(communities)
+      .where(
+        and(
+          eq(communities.id, targetId),
+          eq(communities.isPublic, true),
+          eq(communities.status, "active"),
+        ),
+      )
+      .limit(1);
+    communityId = target?.id ?? null;
+    postId = null;
   }
   if (!communityId) return null;
 
@@ -1175,7 +1283,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               : 10 * 1024 * 1024;
       } else {
         const postId = body.data.postId!;
-        const communityId = await activePostCommunityId(postId);
+        const communityId = await activePostCommunityId(postId, userId);
         if (!communityId) {
           return reply.code(404).send({
             error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -1271,15 +1379,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     const cursor = decodeCursor(parsedQuery.data.cursor);
     if (cursor === null) return invalidCursor(reply);
 
-    const managedCommunities = await database
-      .select({ id: communityMemberships.communityId })
-      .from(communityMemberships)
-      .where(
-        and(
-          eq(communityMemberships.userId, userId),
-          inArray(communityMemberships.role, ["owner", "moderator"]),
-        ),
-      );
+    const managedCommunities = await moderatorCommunityOptions(userId);
     if (!managedCommunities.length) {
       return reply.code(403).send({
         error: {
@@ -1288,11 +1388,26 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         },
       });
     }
+    const selectedCommunity = parsedQuery.data.community
+      ? managedCommunities.find(
+          (community) => community.slug === parsedQuery.data.community,
+        )
+      : null;
+    if (parsedQuery.data.community && !selectedCommunity) {
+      return reply.code(403).send({
+        error: {
+          code: "MODERATOR_REQUIRED",
+          message: "You cannot view moderation history for that community.",
+        },
+      });
+    }
 
     const conditions = [
       inArray(
         moderationActions.communityId,
-        managedCommunities.map((community) => community.id),
+        selectedCommunity
+          ? [selectedCommunity.id]
+          : managedCommunities.map((community) => community.id),
       ),
     ];
     if (cursor) {
@@ -1313,6 +1428,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         targetId: moderationActions.targetId,
         action: moderationActions.action,
         reason: moderationActions.reason,
+        details: moderationActions.details,
         createdAt: moderationActions.createdAt,
         actorUsername: profiles.username,
         actorDisplayName: profiles.displayName,
@@ -1343,6 +1459,37 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!parsedQuery.success) return invalidRequest(reply);
     const cursor = decodeCursor(parsedQuery.data.cursor);
     if (cursor === null) return invalidCursor(reply);
+    const managedCommunities = await moderatorCommunityOptions(userId);
+    if (!managedCommunities.length) {
+      return reply.code(403).send({
+        error: {
+          code: "MODERATOR_REQUIRED",
+          message: "Community moderator access is required.",
+        },
+      });
+    }
+    const selectedCommunity = parsedQuery.data.community
+      ? managedCommunities.find(
+          (community) => community.slug === parsedQuery.data.community,
+        )
+      : null;
+    if (parsedQuery.data.community && !selectedCommunity) {
+      return reply.code(403).send({
+        error: {
+          code: "MODERATOR_REQUIRED",
+          message: "You cannot view reports for that community.",
+        },
+      });
+    }
+    const postCommunityFilter = selectedCommunity
+      ? sql`and reported_post.community_id = ${selectedCommunity.id}`
+      : sql``;
+    const replyCommunityFilter = selectedCommunity
+      ? sql`and reply_post.community_id = ${selectedCommunity.id}`
+      : sql``;
+    const communityReportFilter = selectedCommunity
+      ? sql`and reported_community.id = ${selectedCommunity.id}`
+      : sql``;
 
     const conditions = [
       eq(reports.status, parsedQuery.data.status),
@@ -1355,6 +1502,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             and reported_post.id = ${reports.targetId}
             and post_manager.user_id = ${userId}
             and post_manager.role in ('owner', 'moderator')
+            ${postCommunityFilter}
         )
         or exists (
           select 1 from ${replies} as reported_reply
@@ -1365,6 +1513,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             and reported_reply.id = ${reports.targetId}
             and reply_manager.user_id = ${userId}
             and reply_manager.role in ('owner', 'moderator')
+            ${replyCommunityFilter}
+        )
+        or exists (
+          select 1 from ${communities} as reported_community
+          inner join ${communityMemberships} as community_manager
+            on community_manager.community_id = reported_community.id
+          where ${reports.targetType} = 'community'
+            and reported_community.id = ${reports.targetId}
+            and community_manager.user_id = ${userId}
+            and community_manager.role in ('owner', 'moderator')
+            ${communityReportFilter}
         )
       )`,
     ];
@@ -1393,14 +1552,57 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           when ${reports.targetType} = 'post' then (
             select ${posts.body} from ${posts} where ${posts.id} = ${reports.targetId}
           )
-          else (
+          when ${reports.targetType} = 'reply' then (
             select ${replies.body} from ${replies} where ${replies.id} = ${reports.targetId}
+          )
+          else (
+            select ${communities.name} || E'\\n' || ${communities.description}
+            from ${communities} where ${communities.id} = ${reports.targetId}
           )
         end`,
         postId: sql<string | null>`case
           when ${reports.targetType} = 'post' then ${reports.targetId}
-          else (
+          when ${reports.targetType} = 'reply' then (
             select ${replies.postId} from ${replies} where ${replies.id} = ${reports.targetId}
+          )
+          else null
+        end`,
+        communitySlug: sql<string | null>`case
+          when ${reports.targetType} = 'community' then (
+            select ${communities.slug}
+            from ${communities} where ${communities.id} = ${reports.targetId}
+          )
+          when ${reports.targetType} = 'post' then (
+            select ${communities.slug}
+            from ${posts}
+            inner join ${communities} on ${communities.id} = ${posts.communityId}
+            where ${posts.id} = ${reports.targetId}
+          )
+          else (
+            select ${communities.slug}
+            from ${replies}
+            inner join ${posts} on ${posts.id} = ${replies.postId}
+            inner join ${communities} on ${communities.id} = ${posts.communityId}
+            where ${replies.id} = ${reports.targetId}
+          )
+        end`,
+        communityName: sql<string | null>`case
+          when ${reports.targetType} = 'community' then (
+            select ${communities.name}
+            from ${communities} where ${communities.id} = ${reports.targetId}
+          )
+          when ${reports.targetType} = 'post' then (
+            select ${communities.name}
+            from ${posts}
+            inner join ${communities} on ${communities.id} = ${posts.communityId}
+            where ${posts.id} = ${reports.targetId}
+          )
+          else (
+            select ${communities.name}
+            from ${replies}
+            inner join ${posts} on ${posts.id} = ${replies.postId}
+            inner join ${communities} on ${communities.id} = ${posts.communityId}
+            where ${replies.id} = ${reports.targetId}
           )
         end`,
       })
@@ -1436,9 +1638,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       .from(reports)
       .where(eq(reports.id, params.data.id))
       .limit(1);
-    if (!report || !["post", "reply"].includes(report.targetType)) {
+    if (!report || !["post", "reply", "community"].includes(report.targetType)) {
       return reply.code(404).send({
         error: { code: "REPORT_NOT_FOUND", message: "Report not found." },
+      });
+    }
+    if (report.targetType === "community" && body.data.removeContent) {
+      return reply.code(400).send({
+        error: {
+          code: "COMMUNITY_REPORT_CANNOT_REMOVE_CONTENT",
+          message: "Community reports cannot automatically remove a community.",
+        },
       });
     }
     const manageable = await moderatorForReportTarget(
@@ -1473,6 +1683,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           targetId: report.id,
           action: body.data.status,
           reason: body.data.reason,
+          details: {
+            reportTargetType: report.targetType,
+            reportTargetId: report.targetId,
+            removeContent: body.data.removeContent,
+          },
         });
         if (body.data.removeContent) {
           const deletedAt = new Date();
@@ -1520,13 +1735,16 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               report.targetType === "post" ? "post.deleted" : "reply.deleted",
             communityId: manageable.communityId,
             entityId:
-              report.targetType === "post"
-                ? report.targetId
-                : manageable.postId,
+              report.targetType === "reply"
+                ? (manageable.postId ?? report.targetId)
+                : report.targetId,
             payload:
-              report.targetType === "post"
-                ? { postId: report.targetId }
-                : { postId: manageable.postId, replyId: report.targetId },
+              report.targetType === "reply"
+                ? {
+                    postId: manageable.postId ?? report.targetId,
+                    replyId: report.targetId,
+                  }
+                : { postId: report.targetId },
           });
           await transaction.insert(moderationActions).values({
             actorId: userId,
@@ -1535,6 +1753,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             targetId: report.targetId,
             action: "content_removed",
             reason: body.data.reason,
+            details: { reportId: report.id },
           });
         }
       }
@@ -1553,6 +1772,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             authorId: posts.authorId,
             communityId: posts.communityId,
             url: posts.url,
+            audioCoverUrl: posts.audioCoverUrl,
           })
           .from(posts)
           .where(eq(posts.id, report.targetId))
@@ -1564,6 +1784,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             asset.authorId,
             asset.communityId,
             asset.url,
+            asset.audioCoverUrl,
           );
         }
       } else {
@@ -1587,7 +1808,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     }
     if (updatedReport && body.data.removeContent && indexableCommunitySlug) {
       notifyIndexNow(
-        [indexNowPageUrl(`/p/${encodeURIComponent(manageable.postId)}`)],
+        [
+          indexNowPageUrl(
+            `/p/${encodeURIComponent(manageable.postId ?? report.targetId)}`,
+          ),
+        ],
         environment.INDEXNOW_KEY,
         request.log,
         environment.NODE_ENV === "production",
@@ -1754,6 +1979,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               eq(posts.id, body.data.targetId),
               isNull(posts.deletedAt),
               eq(communities.isPublic, true),
+              or(
+                eq(communities.postsPrivate, false),
+                sql`exists (
+                  select 1 from ${communityMemberships}
+                  where ${communityMemberships.communityId} = ${posts.communityId}
+                    and ${communityMemberships.userId} = ${userId}
+                )`,
+              ),
               eq(communities.status, "active"),
             )
           : body.data.targetType === "reply"
@@ -1950,6 +2183,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             targetId: target.userId,
             action: `role_${result.role}`,
             reason: `Community owner ${actor?.username ?? "unknown"} changed the member role.`,
+            details: {
+              previousRole: membership.role,
+              role: result.role,
+              targetUsername: target.username,
+            },
           });
           if (
             (
@@ -2184,6 +2422,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           targetId: target.id,
           action: actionName,
           reason: body.data.reason,
+          details: {
+            operation: body.data.action,
+            targetUsername: target.username,
+          },
         });
         if (
           (
@@ -2285,6 +2527,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             bannerUrl: communities.bannerUrl,
             websiteUrl: communities.websiteUrl,
             chatEnabled: communities.chatEnabled,
+            postsPrivate: communities.postsPrivate,
           })
           .from(communities)
           .where(
@@ -2350,6 +2593,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             ...(body.data.chatEnabled === undefined
               ? {}
               : { chatEnabled: body.data.chatEnabled }),
+            ...(body.data.postsPrivate === undefined
+              ? {}
+              : { postsPrivate: body.data.postsPrivate }),
             slug: nextSlug,
             updatedAt: new Date(),
           })
@@ -2363,6 +2609,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             bannerUrl: communities.bannerUrl,
             websiteUrl: communities.websiteUrl,
             chatEnabled: communities.chatEnabled,
+            postsPrivate: communities.postsPrivate,
           });
         if (!updated) return { kind: "notFound" as const };
         await transaction.insert(outboxEvents).values({
@@ -2559,6 +2806,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           targetId: target.id,
           action: "owner_transferred",
           reason: `Ownership transferred to ${target.username}.`,
+          details: {
+            previousOwnerId: previousOwnerId,
+            newOwnerId: target.id,
+            newOwnerUsername: target.username,
+          },
         });
 
         const affectedUsers = [...new Set([target.id, previousOwnerId])];
@@ -3242,6 +3494,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               slug,
               name: body.data.name,
               description: body.data.description,
+              postsPrivate: body.data.postsPrivate,
               creatorId: userId,
             })
             .returning({
@@ -3249,6 +3502,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               slug: communities.slug,
               name: communities.name,
               description: communities.description,
+              postsPrivate: communities.postsPrivate,
               createdAt: communities.createdAt,
             });
           if (!created) return { kind: "limit" as const };
@@ -3678,6 +3932,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             communityName: communities.name,
             communityAvatarUrl: communities.avatarUrl,
             voteCount: posts.voteCount,
+            viewerVote: sql<string | null>`(
+              select case
+                when ${postReactions.type} = 'like' then 'up'
+                else 'down'
+              end
+              from ${postReactions}
+              where ${postReactions.postId} = ${posts.id}
+                and ${postReactions.userId} = ${userId}
+                and ${postReactions.type} in ('like', 'downvote')
+              limit 1
+            )`,
           })
           .from(posts)
           .innerJoin(communities, eq(communities.id, posts.communityId))
@@ -3710,6 +3975,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             memberCount: sql<number>`(
               select count(*)::int from ${communityMemberships} share_member
               where share_member.community_id = ${communities.id}
+            )`,
+            isJoined: sql<boolean>`exists (
+              select 1 from ${communityMemberships}
+              where ${communityMemberships.communityId} = ${communities.id}
+                and ${communityMemberships.userId} = ${userId}
             )`,
           })
           .from(communities)
@@ -3744,6 +4014,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               select count(*)::int from ${userFollows}
               where ${userFollows.followedId} = ${profiles.userId}
             )`,
+            isFollowing: sql<boolean>`exists (
+              select 1 from ${userFollows}
+              where ${userFollows.followedId} = ${profiles.userId}
+                and ${userFollows.followerId} = ${userId}
+            )`,
           })
           .from(profiles)
           .innerJoin(users, eq(users.id, profiles.userId))
@@ -3762,6 +4037,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         sharedItem = item;
       }
       let replyToBody: string | null = null;
+      let replyToAuthorName: string | null = null;
       let replyToAuthorId: string | null = null;
       if (body.data.replyToId) {
         const [parent] = await database
@@ -3769,8 +4045,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             id: communityChatMessages.id,
             body: communityChatMessages.body,
             authorId: communityChatMessages.authorId,
+            authorName: profiles.displayName,
           })
           .from(communityChatMessages)
+          .innerJoin(profiles, eq(profiles.userId, communityChatMessages.authorId))
           .where(
             and(
               eq(communityChatMessages.id, body.data.replyToId),
@@ -3787,6 +4065,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         replyToBody = parent.body;
+        replyToAuthorName = parent.authorName;
         replyToAuthorId = parent.authorId;
       }
       const [message] = await database.transaction(async (transaction) => {
@@ -3807,6 +4086,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           })
           .returning();
         if (createdMessage) {
+          await recordDailyActivityStreak(transaction, userId);
           await transaction.insert(outboxEvents).values({
             topic: "community.chat.message.created",
             communityId: community.id,
@@ -3966,6 +4246,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         message: {
           ...message,
           replyToBody,
+          replyToAuthorName,
           reactions: [],
           author: {
             ...author,
@@ -4028,27 +4309,62 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           error: { code: "COMMUNITY_MODERATOR_REQUIRED", message: "Only owners and moderators can pin chat messages." },
         });
       }
-      const [message] = await database
-        .update(communityChatMessages)
-        .set({ pinnedAt: body.data.pinned ? new Date() : null })
-        .where(
-          and(
-            eq(communityChatMessages.id, params.data.id),
-            eq(communityChatMessages.communityId, community.id),
-          ),
-        )
-        .returning({ id: communityChatMessages.id, pinnedAt: communityChatMessages.pinnedAt });
+      const [message] = await database.transaction(async (transaction) => {
+        const [current] = await transaction
+          .select({
+            id: communityChatMessages.id,
+            pinnedAt: communityChatMessages.pinnedAt,
+          })
+          .from(communityChatMessages)
+          .where(
+            and(
+              eq(communityChatMessages.id, params.data.id),
+              eq(communityChatMessages.communityId, community.id),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!current) return [undefined];
+        if (Boolean(current.pinnedAt) === body.data.pinned) return [current];
+        const [updated] = await transaction
+          .update(communityChatMessages)
+          .set({ pinnedAt: body.data.pinned ? new Date() : null })
+          .where(
+            and(
+              eq(communityChatMessages.id, params.data.id),
+              eq(communityChatMessages.communityId, community.id),
+            ),
+          )
+          .returning({
+            id: communityChatMessages.id,
+            pinnedAt: communityChatMessages.pinnedAt,
+          });
+        if (updated) {
+          await transaction.insert(moderationActions).values({
+            actorId: userId,
+            communityId: community.id,
+            targetType: "chat_message",
+            targetId: updated.id,
+            action: body.data.pinned ? "chat_message_pinned" : "chat_message_unpinned",
+            reason: body.data.pinned
+              ? "Pinned a community chat message."
+              : "Unpinned a community chat message.",
+            details: { pinned: body.data.pinned },
+          });
+          await transaction.insert(outboxEvents).values({
+            topic: "community.chat.message.updated",
+            communityId: community.id,
+            entityId: updated.id,
+            payload: { messageId: updated.id, isPinned: body.data.pinned },
+          });
+        }
+        return [updated];
+      });
       if (!message) {
         return reply.code(404).send({
           error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
         });
       }
-      await database.insert(outboxEvents).values({
-        topic: "community.chat.message.updated",
-        communityId: community.id,
-        entityId: message.id,
-        payload: { messageId: message.id, isPinned: body.data.pinned },
-      });
       return { message: { id: message.id, isPinned: body.data.pinned } };
     },
   );
@@ -4466,15 +4782,37 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
-      const [deleted] = await database
-        .delete(communityChatMessages)
-        .where(
-          and(
-            eq(communityChatMessages.id, params.data.id),
-            eq(communityChatMessages.communityId, community.id),
-          ),
-        )
-        .returning({ id: communityChatMessages.id });
+      const [deleted] = await database.transaction(async (transaction) => {
+        const [removed] = await transaction
+          .delete(communityChatMessages)
+          .where(
+            and(
+              eq(communityChatMessages.id, params.data.id),
+              eq(communityChatMessages.communityId, community.id),
+            ),
+          )
+          .returning({ id: communityChatMessages.id });
+        if (removed) {
+          if (targetMessage.authorId !== userId) {
+            await transaction.insert(moderationActions).values({
+              actorId: userId,
+              communityId: community.id,
+              targetType: "chat_message",
+              targetId: removed.id,
+              action: "chat_message_removed",
+              reason: "Removed a community chat message.",
+              details: { messageAuthorId: targetMessage.authorId },
+            });
+          }
+          await transaction.insert(outboxEvents).values({
+            topic: "community.chat.message.deleted",
+            communityId: community.id,
+            entityId: removed.id,
+            payload: { messageId: removed.id },
+          });
+        }
+        return [removed];
+      });
       if (!deleted) {
         return reply.code(404).send({
           error: {
@@ -4483,12 +4821,6 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
-      await database.insert(outboxEvents).values({
-        topic: "community.chat.message.deleted",
-        communityId: community.id,
-        entityId: deleted.id,
-        payload: { messageId: deleted.id },
-      });
       return reply.code(204).send();
     },
   );
@@ -4651,10 +4983,12 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             isNews: body.data.isNews,
             body: body.data.body,
             url,
+            audioCoverUrl: body.data.audioCoverUrl ?? null,
             linkDomain: url ? new URL(url).hostname : null,
           })
           .returning({ id: posts.id, communityId: posts.communityId });
         if (post) {
+          await recordDailyActivityStreak(transaction, userId);
           await transaction.insert(outboxEvents).values({
             topic: "post.created",
             communityId: post.communityId,
@@ -5007,6 +5341,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .where(and(eq(posts.id, post.id), isNull(posts.deletedAt)))
         .returning({ id: posts.id });
       if (removed) {
+        if (post.authorId !== userId) {
+          await transaction.insert(moderationActions).values({
+            actorId: userId,
+            communityId: post.communityId,
+            targetType: "post",
+            targetId: post.id,
+            action: "post_removed",
+            reason: "Removed a community post.",
+            details: { postAuthorId: post.authorId },
+          });
+        }
         await recordPostEmberRemoval(transaction, {
           postId: post.id,
           actorId: userId,
@@ -5055,6 +5400,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       post.authorId,
       post.communityId,
       post.url,
+      post.audioCoverUrl,
     );
     if (indexableCommunitySlug) {
       notifyIndexNow(
@@ -5082,6 +5428,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         id: posts.id,
         authorId: posts.authorId,
         communityId: posts.communityId,
+        communityPinnedAt: posts.communityPinnedAt,
         creatorId: communities.creatorId,
       })
       .from(posts)
@@ -5149,6 +5496,21 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             ),
           );
       } else if (pinned) {
+        const [previousPin] = await transaction
+          .select({
+            id: posts.id,
+            authorId: posts.authorId,
+          })
+          .from(posts)
+          .where(
+            and(
+              eq(posts.communityId, post.communityId),
+              ne(posts.id, post.id),
+              isNotNull(posts.communityPinnedAt),
+            ),
+          )
+          .for("update")
+          .limit(1);
         await transaction
           .update(posts)
           .set({ communityPinnedAt: null, updatedAt: now })
@@ -5159,6 +5521,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               isNotNull(posts.communityPinnedAt),
             ),
           );
+        if (previousPin) {
+          await transaction.insert(moderationActions).values({
+            actorId: userId,
+            communityId: post.communityId,
+            targetType: "post",
+            targetId: previousPin.id,
+            action: "post_unpinned",
+            reason: "Replaced the community's pinned post.",
+            details: { postAuthorId: previousPin.authorId },
+          });
+        }
       }
       await transaction
         .update(posts)
@@ -5169,6 +5542,22 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           updatedAt: now,
         })
         .where(eq(posts.id, post.id));
+      if (
+        params.data.scope === "community" &&
+        Boolean(post.communityPinnedAt) !== pinned
+      ) {
+        await transaction.insert(moderationActions).values({
+          actorId: userId,
+          communityId: post.communityId,
+          targetType: "post",
+          targetId: post.id,
+          action: pinned ? "post_pinned" : "post_unpinned",
+          reason: pinned
+            ? "Pinned a community post."
+            : "Unpinned a community post.",
+          details: { postAuthorId: post.authorId },
+        });
+      }
       await transaction.insert(outboxEvents).values({
         topic: "post.updated",
         communityId: post.communityId,
@@ -5198,7 +5587,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       const params = idParamsSchema.safeParse(request.params);
       const body = createReplySchema.safeParse(request.body);
       if (!params.success || !body.success) return invalidRequest(reply);
-      const communityId = await activePostCommunityId(params.data.id);
+      const communityId = await activePostCommunityId(params.data.id, userId);
       if (!communityId) {
         return reply.code(404).send({
           error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -5301,6 +5690,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           })
           .returning({ id: replies.id });
         if (newReply) {
+          await recordDailyActivityStreak(transaction, userId);
           await transaction.insert(outboxEvents).values({
             topic: "reply.created",
             communityId,
@@ -5537,6 +5927,20 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .where(and(eq(replies.id, target.id), isNull(replies.deletedAt)))
         .returning({ id: replies.id });
       if (result) {
+        if (target.authorId !== userId) {
+          await transaction.insert(moderationActions).values({
+            actorId: userId,
+            communityId: target.communityId,
+            targetType: "reply",
+            targetId: target.id,
+            action: "reply_removed",
+            reason: "Removed a community reply.",
+            details: {
+              replyAuthorId: target.authorId,
+              postId: target.postId,
+            },
+          });
+        }
         await recordReplyEmberRemoval(transaction, {
           replyId: target.id,
           actorId: userId,
@@ -5581,7 +5985,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       .object({ direction: z.enum(["up", "down"]) })
       .safeParse(request.body);
     if (!params.success || !body.success) return invalidRequest(reply);
-    const communityId = await activePostCommunityId(params.data.id);
+    const communityId = await activePostCommunityId(params.data.id, userId);
     if (!communityId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -5615,7 +6019,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!userId) return;
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
-    const communityId = await activePostCommunityId(params.data.id);
+    const communityId = await activePostCommunityId(params.data.id, userId);
     if (!communityId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -5643,7 +6047,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!userId) return;
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
-    const communityId = await activePostCommunityId(params.data.id);
+    const communityId = await activePostCommunityId(params.data.id, userId);
     if (!communityId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -5686,6 +6090,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           isNull(replies.deletedAt),
           isNull(posts.deletedAt),
           eq(communities.isPublic, true),
+          or(
+            eq(communities.postsPrivate, false),
+            sql`exists (
+              select 1 from ${communityMemberships}
+              where ${communityMemberships.communityId} = ${posts.communityId}
+                and ${communityMemberships.userId} = ${userId}
+            )`,
+          ),
           eq(communities.status, "active"),
         ),
       )
@@ -5705,6 +6117,16 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return database.transaction(async (transaction) => {
+      const [lockedReply] = await transaction
+        .select({ id: replies.id, voteCount: replies.voteCount })
+        .from(replies)
+        .where(eq(replies.id, target.id))
+        .for("update");
+      if (!lockedReply) {
+        return reply.code(404).send({
+          error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
+        });
+      }
       const [reaction] = await transaction
         .insert(replyReactions)
         .values({ userId, replyId: target.id, type: "like" })
@@ -5771,6 +6193,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           isNull(replies.deletedAt),
           isNull(posts.deletedAt),
           eq(communities.isPublic, true),
+          or(
+            eq(communities.postsPrivate, false),
+            sql`exists (
+              select 1 from ${communityMemberships}
+              where ${communityMemberships.communityId} = ${posts.communityId}
+                and ${communityMemberships.userId} = ${userId}
+            )`,
+          ),
           eq(communities.status, "active"),
         ),
       )
@@ -5782,6 +6212,16 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return database.transaction(async (transaction) => {
+      const [lockedReply] = await transaction
+        .select({ id: replies.id, voteCount: replies.voteCount })
+        .from(replies)
+        .where(eq(replies.id, target.id))
+        .for("update");
+      if (!lockedReply) {
+        return reply.code(404).send({
+          error: { code: "REPLY_NOT_FOUND", message: "Reply not found." },
+        });
+      }
       const [reaction] = await transaction
         .delete(replyReactions)
         .where(
@@ -5836,7 +6276,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!userId) return;
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
-    const communityId = await activePostCommunityId(params.data.id);
+    const communityId = await activePostCommunityId(params.data.id, userId);
     if (!communityId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },
@@ -5856,7 +6296,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     if (!userId) return;
     const params = idParamsSchema.safeParse(request.params);
     if (!params.success) return invalidRequest(reply);
-    const communityId = await activePostCommunityId(params.data.id);
+    const communityId = await activePostCommunityId(params.data.id, userId);
     if (!communityId) {
       return reply.code(404).send({
         error: { code: "POST_NOT_FOUND", message: "Post not found." },

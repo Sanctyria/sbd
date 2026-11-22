@@ -1,0 +1,1 @@
+ALTER TABLE "moderation_actions" ADD COLUMN "details" jsonb DEFAULT '{}'::jsonb NOT NULL;

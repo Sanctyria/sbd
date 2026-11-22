@@ -90,6 +90,7 @@ const seoSitemapQuerySchema = z.object({
 
 const notificationsQuerySchema = pageQuerySchema.extend({
   unread: z.enum(["true", "false"]).optional(),
+  messages: z.enum(["true", "false"]).optional(),
 });
 const linkPreviewQuerySchema = z.object({
   url: z.string().trim().min(1).max(2048).url(),
@@ -221,6 +222,7 @@ const moderatorSafePostFields = {
   isNews: posts.isNews,
   body: sql<string>`case when ${posts.deletedByModerator} then '' else ${posts.body} end`,
   url: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.url} end`,
+  audioCoverUrl: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.audioCoverUrl} end`,
   linkTitle: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkTitle} end`,
   linkDescription: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkDescription} end`,
   linkDomain: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.linkDomain} end`,
@@ -297,6 +299,42 @@ async function currentViewerId(
     )
     .limit(1);
   return session?.userId ?? null;
+}
+
+function privateCommunityPostsVisibleTo(viewerId: string | null) {
+  if (!viewerId) return eq(communities.postsPrivate, false);
+  return or(
+    eq(communities.postsPrivate, false),
+    exists(
+      database
+        .select({ userId: communityMemberships.userId })
+        .from(communityMemberships)
+        .where(
+          and(
+            eq(communityMemberships.communityId, communities.id),
+            eq(communityMemberships.userId, viewerId),
+          ),
+        ),
+    ),
+  )!;
+}
+
+function notificationPrivatePostsVisibleTo(viewerId: string) {
+  return sql`not exists (
+    select 1
+    from ${posts} notification_private_post
+    inner join ${communities} notification_private_community
+      on notification_private_community.id = notification_private_post.community_id
+    where notification_private_post.id = ${notifications.entityId}
+      and notification_private_community.posts_private = true
+      and not exists (
+        select 1
+        from ${communityMemberships} notification_private_membership
+        where notification_private_membership.community_id =
+          notification_private_community.id
+          and notification_private_membership.user_id = ${viewerId}
+      )
+  )`;
 }
 
 export async function publicRoutes(app: FastifyInstance): Promise<void> {
@@ -542,6 +580,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             isNull(users.suspendedAt),
             eq(communities.isPublic, true),
             eq(communities.status, "active"),
+            privateCommunityPostsVisibleTo(viewerId),
             or(ilike(posts.body, pattern), ilike(posts.linkTitle, pattern)),
           ),
         )
@@ -592,6 +631,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )!,
       );
     }
+
     if (cursor) {
       conditions.push(
         or(
@@ -673,6 +713,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         bannerUrl: communities.bannerUrl,
         websiteUrl: communities.websiteUrl,
         chatEnabled: communities.chatEnabled,
+        postsPrivate: communities.postsPrivate,
         createdAt: communities.createdAt,
         updatedAt: communities.updatedAt,
         memberCount: viewerId
@@ -729,6 +770,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         communities.avatarUrl,
         communities.bannerUrl,
         communities.websiteUrl,
+        communities.postsPrivate,
         communities.createdAt,
       )
       .limit(1);
@@ -988,10 +1030,51 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
             select parent.body from ${communityChatMessages} parent
             where parent.id = ${communityChatMessages.replyToId}
           )`,
+          replyToAuthorName: sql<string | null>`(
+            select reply_author.display_name
+            from ${communityChatMessages} parent
+            inner join ${profiles} reply_author
+              on reply_author.user_id = parent.author_id
+            where parent.id = ${communityChatMessages.replyToId}
+          )`,
           editedAt: communityChatMessages.editedAt,
           sharedItemType: communityChatMessages.sharedItemType,
           sharedItemId: communityChatMessages.sharedItemId,
-          sharedItem: communityChatMessages.sharedItem,
+          sharedItem: sql<Record<string, unknown> | null>`case
+            when ${communityChatMessages.sharedItem} is null then null
+            else ${communityChatMessages.sharedItem} || jsonb_build_object(
+              'viewerVote', (
+                select case
+                  when ${postReactions.type} = 'like' then 'up'
+                  else 'down'
+                end
+                from ${postReactions}
+                where ${postReactions.postId} =
+                    (${communityChatMessages.sharedItem}->>'id')::uuid
+                  and ${postReactions.userId} = ${viewerId}
+                  and ${postReactions.type} in ('like', 'downvote')
+                limit 1
+              ),
+              'isJoined', exists (
+                select 1
+                from ${communityMemberships}
+                inner join ${communities} shared_community
+                  on shared_community.id = ${communityMemberships.communityId}
+                where shared_community.slug =
+                    ${communityChatMessages.sharedItem}->>'slug'
+                  and ${communityMemberships.userId} = ${viewerId}
+              ),
+              'isFollowing', exists (
+                select 1
+                from ${userFollows}
+                inner join ${profiles} shared_profile
+                  on shared_profile.user_id = ${userFollows.followedId}
+                where shared_profile.username =
+                    ${communityChatMessages.sharedItem}->>'username'
+                  and ${userFollows.followerId} = ${viewerId}
+              )
+            )
+          end`,
           isPinned: sql<boolean>`${communityChatMessages.pinnedAt} is not null`,
           reactions: sql<
             { emoji: string; count: number; reacted: boolean }[]
@@ -1258,6 +1341,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         initials: profiles.initials,
         avatarColor: profiles.avatarColor,
         ember: profiles.ember,
+        activityStreak: sql<number>`case
+          when ${users.lastActivityDate} >= ((now() at time zone 'utc')::date - 1)
+            then ${users.activityStreak}
+          else 0
+        end`.mapWith(Number),
+        bestActivityStreak: users.bestActivityStreak,
         verified: profiles.isVerified,
         createdAt: communityMemberships.createdAt,
         role: communityMemberships.role,
@@ -1661,6 +1750,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
         isNull(users.deletedAt),
         eq(communities.isPublic, true),
+        eq(communities.postsPrivate, false),
         eq(communities.status, "active"),
       ];
       if (cursor) {
@@ -1785,6 +1875,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       isNull(posts.deletedAt),
       isNull(users.deletedAt),
       eq(communities.isPublic, true),
+      eq(communities.postsPrivate, false),
       eq(communities.status, "active"),
     ];
     if (cursor) {
@@ -1903,9 +1994,18 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const cursor = decodeCursor(parsedQuery.data.cursor);
     if (cursor === null) return invalidCursor(reply);
 
-    const conditions = [eq(notifications.recipientId, viewerId)];
+    const conditions = [
+      eq(notifications.recipientId, viewerId),
+      notificationPrivatePostsVisibleTo(viewerId),
+    ];
     if (parsedQuery.data.unread === "true") {
       conditions.push(isNull(notifications.readAt));
+    }
+    if (parsedQuery.data.messages === "true") {
+      conditions.push(
+        sql`(${notifications.payload}->>'action' = 'chat_message'
+          or ${notifications.payload}->>'targetKind' = 'chat_reply')`,
+      );
     }
     if (cursor) {
       conditions.push(
@@ -1924,6 +2024,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .where(
         and(
           eq(notifications.recipientId, viewerId),
+          notificationPrivatePostsVisibleTo(viewerId),
           isNull(notifications.readAt),
         ),
       );
@@ -2076,6 +2177,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
       eq(communities.isPublic, true),
+      privateCommunityPostsVisibleTo(viewerId),
       eq(communities.status, "active"),
       sql`not exists (
         select 1 from ${userBlocks}
@@ -2193,9 +2295,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/v1/feed", async (request, reply) => {
     const parsedQuery = feedQuerySchema.safeParse(request.query);
     if (!parsedQuery.success) return invalidRequest(reply);
+    const viewerId = await currentViewerId(request);
 
     const conditions = [
       eq(communities.isPublic, true),
+      privateCommunityPostsVisibleTo(viewerId),
       eq(communities.status, "active"),
       or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
@@ -2256,7 +2360,6 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       );
     }
     let personalized = false;
-    const viewerId = await currentViewerId(request);
     const replyCountExpression = sql<number>`case when ${posts.deletedByModerator} then 0 else (
       select count(*)::int
       from ${replies}
@@ -2458,6 +2561,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const postConditions = [
       eq(posts.id, parsedParams.data.id),
       eq(communities.isPublic, true),
+      privateCommunityPostsVisibleTo(viewerId),
       eq(communities.status, "active"),
       or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),
@@ -2609,6 +2713,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     const conditions = [
       eq(posts.id, parsedParams.data.id),
       eq(communities.isPublic, true),
+      privateCommunityPostsVisibleTo(viewerId),
       eq(communities.status, "active"),
       or(isNull(posts.deletedAt), eq(posts.deletedByModerator, true))!,
       isNull(users.deletedAt),

@@ -57,6 +57,9 @@ export const users = pgTable("users", {
   updatedAt: updatedAt(),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   suspendedAt: timestamp("suspended_at", { withTimezone: true }),
+  activityStreak: integer("activity_streak").notNull().default(0),
+  bestActivityStreak: integer("best_activity_streak").notNull().default(0),
+  lastActivityDate: date("last_activity_date", { mode: "string" }),
 });
 
 export const idempotencyRecords = pgTable(
@@ -278,6 +281,7 @@ export const communities = pgTable(
     bannerUrl: text("banner_url"),
     websiteUrl: text("website_url"),
     chatEnabled: boolean("chat_enabled").notNull().default(false),
+    postsPrivate: boolean("posts_private").notNull().default(false),
     creatorId: uuid("creator_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -423,6 +427,7 @@ export const posts = pgTable(
     isNews: boolean("is_news").notNull().default(false),
     body: text("body").notNull(),
     url: text("url"),
+    audioCoverUrl: text("audio_cover_url"),
     profilePinnedAt: timestamp("profile_pinned_at", { withTimezone: true }),
     communityPinnedAt: timestamp("community_pinned_at", {
       withTimezone: true,
@@ -674,6 +679,10 @@ export const moderationActions = pgTable(
     targetId: uuid("target_id").notNull(),
     action: text("action").notNull(),
     reason: text("reason").notNull(),
+    details: jsonb("details")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
     createdAt: createdAt(),
   },
   (table) => [
