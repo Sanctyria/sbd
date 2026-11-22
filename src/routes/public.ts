@@ -145,7 +145,7 @@ const feedQuerySchema = pageQuerySchema
       .string()
       .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/)
       .optional(),
-    media: z.enum(["video"]).optional(),
+    media: z.enum(["video", "audio"]).optional(),
   })
   .superRefine((query, context) => {
     if (query.scope === "community" && !query.community) {
@@ -1415,6 +1415,12 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         initials: profiles.initials,
         avatarColor: profiles.avatarColor,
         ember: profiles.ember,
+        activityStreak: sql<number>`case
+          when ${users.lastActivityDate} >= ((now() at time zone 'utc')::date - 1)
+            then ${users.activityStreak}
+          else 0
+        end`.mapWith(Number),
+        bestActivityStreak: users.bestActivityStreak,
         verified: profiles.isVerified,
         createdAt: profiles.createdAt,
         indexingOptedIn: profiles.isIndexingOptedIn,
@@ -2343,6 +2349,8 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           ),
         )!,
       );
+    } else if (parsedQuery.data.media === "audio") {
+      conditions.push(eq(posts.kind, "audio_url"));
     }
     if (parsedQuery.data.members === "only") {
       conditions.push(
