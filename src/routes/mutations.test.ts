@@ -99,6 +99,7 @@ describe("community mutation request schemas", () => {
     for (const [sharedItemType, sharedItemId] of [
       ["post", "00000000-0000-4000-8000-000000000002"],
       ["community", "worldbuilding"],
+      ["chat", "worldbuilding"],
       ["profile", "mira"],
     ]) {
       expect(

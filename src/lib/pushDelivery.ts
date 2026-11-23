@@ -225,7 +225,11 @@ export function makeMessage(delivery: ClaimedDelivery) {
       ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}`
       : action === "chat_message" &&
           communitySlug
-        ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}/chat`
+        ? `https://sanctyria.com/r/${encodeURIComponent(communitySlug)}/chat${
+            delivery.entity_id
+              ? `?message=${encodeURIComponent(delivery.entity_id)}`
+              : ""
+          }`
       : delivery.notification_type === "system" && actorUsername
         ? `https://sanctyria.com/u/${encodeURIComponent(actorUsername)}`
         : delivery.entity_id

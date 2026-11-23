@@ -253,6 +253,13 @@
       "when": 1795358979972,
       "tag": "0035_lush_randall",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1795448378657,
+      "tag": "0036_vertexowner_beta_tester",
+      "breakpoints": true
     }
   ]
 }

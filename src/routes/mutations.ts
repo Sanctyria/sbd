@@ -229,7 +229,7 @@ export const createChatMessageSchema = z
     mediaUrl: httpsUrlSchema.optional(),
     mediaKind: z.enum(["image_url", "audio_url"]).optional(),
     replyToId: z.string().uuid().optional(),
-    sharedItemType: z.enum(["post", "community", "profile"]).optional(),
+    sharedItemType: z.enum(["post", "community", "profile", "chat"]).optional(),
     sharedItemId: z.string().min(1).max(100).optional(),
   })
   .superRefine((value, context) => {
@@ -283,7 +283,10 @@ export const communityChatNotificationSchema = z
 const moderationQueueQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
-  community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+  community: z
+    .string()
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+    .optional(),
   status: z
     .enum(["open", "reviewing", "resolved", "dismissed"])
     .default("open"),
@@ -291,7 +294,10 @@ const moderationQueueQuerySchema = z.object({
 const moderationHistoryQuerySchema = z.object({
   cursor: z.string().max(512).optional(),
   limit: z.coerce.number().int().min(1).max(50).default(25),
-  community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+  community: z
+    .string()
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+    .optional(),
 });
 const moderationDecisionSchema = z
   .object({
@@ -408,7 +414,10 @@ export const uploadSignatureSchema = z
       "chat-image",
       "chat-audio",
     ]),
-    communitySlug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).optional(),
+    communitySlug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+      .optional(),
     postId: z.string().uuid().optional(),
     mediaType: z.enum(["image", "video"]).optional(),
   })
@@ -619,33 +628,33 @@ function sendContentCooldown(
 }
 
 type NotificationPreferenceName =
-    | "communityPosts"
-    | "followingPosts"
-    | "replies"
-    | "mentions"
-    | "likes"
-    | "follows"
-    | "communityUpdates";
+  | "communityPosts"
+  | "followingPosts"
+  | "replies"
+  | "mentions"
+  | "likes"
+  | "follows"
+  | "communityUpdates";
 
 async function filterEnabledNotificationRecipients(
-    transaction: DatabaseTransaction,
-    recipientIds: string[],
-    category: NotificationPreferenceName,
+  transaction: DatabaseTransaction,
+  recipientIds: string[],
+  category: NotificationPreferenceName,
 ): Promise<string[]> {
-    const uniqueIds = [...new Set(recipientIds)];
-    if (!uniqueIds.length) return [];
-    const enabledPreference = notificationPreferences[category];
-    const disabled = await transaction
-      .select({ userId: notificationPreferences.userId })
-      .from(notificationPreferences)
-      .where(
-        and(
-          inArray(notificationPreferences.userId, uniqueIds),
-          eq(enabledPreference, false),
-        ),
-      );
-    const disabledIds = new Set(disabled.map(({ userId }) => userId));
-    return uniqueIds.filter((userId) => !disabledIds.has(userId));
+  const uniqueIds = [...new Set(recipientIds)];
+  if (!uniqueIds.length) return [];
+  const enabledPreference = notificationPreferences[category];
+  const disabled = await transaction
+    .select({ userId: notificationPreferences.userId })
+    .from(notificationPreferences)
+    .where(
+      and(
+        inArray(notificationPreferences.userId, uniqueIds),
+        eq(enabledPreference, false),
+      ),
+    );
+  const disabledIds = new Set(disabled.map(({ userId }) => userId));
+  return uniqueIds.filter((userId) => !disabledIds.has(userId));
 }
 
 function sendIdempotencyClaim(
@@ -1077,11 +1086,13 @@ async function setPostVote(
       if (
         postAuthor &&
         postAuthor.userId !== userId &&
-        (await filterEnabledNotificationRecipients(
-          transaction,
-          [postAuthor.userId],
-          "likes",
-        )).length
+        (
+          await filterEnabledNotificationRecipients(
+            transaction,
+            [postAuthor.userId],
+            "likes",
+          )
+        ).length
       ) {
         const [notification] = await transaction
           .insert(notifications)
@@ -1155,7 +1166,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           .limit(1);
         if (!community) {
           return reply.code(404).send({
-            error: { code: "COMMUNITY_NOT_FOUND", message: "Community not found." },
+            error: {
+              code: "COMMUNITY_NOT_FOUND",
+              message: "Community not found.",
+            },
           });
         }
         const [membership] = await database
@@ -1232,7 +1246,16 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         folder = `sanctyria/communities/${community.id}/chat`;
         if (purpose === "chat-audio") {
           resourceType = "video";
-          allowedFormats = ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"];
+          allowedFormats = [
+            "mp3",
+            "wav",
+            "aac",
+            "m4a",
+            "mp4",
+            "ogg",
+            "flac",
+            "webm",
+          ];
           maxBytes = 20 * 1024 * 1024;
         } else {
           resourceType = "image";
@@ -1271,7 +1294,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             : "image";
         allowedFormats =
           purpose === "post-audio"
-            ? ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"]
+            ? ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac", "webm"]
             : resourceType === "video"
               ? ["mp4", "mov"]
               : ["jpg", "jpeg", "png", "webp"];
@@ -1303,7 +1326,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           return reply.code(403).send({
             error: {
               code: "COMMUNITY_MEMBER_MUTED",
-              message: "You cannot upload a reply while muted in this community.",
+              message:
+                "You cannot upload a reply while muted in this community.",
             },
           });
         }
@@ -1333,9 +1357,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         purpose === "post-audio" || purpose === "chat-audio"
           ? sanitizedAudioName
             ? `${sanitizedAudioName}${
-                sourceAudioExtension
-                  ? `--fileext-${sourceAudioExtension}`
-                  : ""
+                sourceAudioExtension ? `--fileext-${sourceAudioExtension}` : ""
               }`
             : "audio"
           : null;
@@ -1366,8 +1388,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           purpose === "post-audio" || purpose === "chat-audio"
             ? 300
             : resourceType === "video"
-            ? 180
-            : null,
+              ? 180
+              : null,
       };
     },
   );
@@ -1638,7 +1660,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       .from(reports)
       .where(eq(reports.id, params.data.id))
       .limit(1);
-    if (!report || !["post", "reply", "community"].includes(report.targetType)) {
+    if (
+      !report ||
+      !["post", "reply", "community"].includes(report.targetType)
+    ) {
       return reply.code(404).send({
         error: { code: "REPORT_NOT_FOUND", message: "Report not found." },
       });
@@ -1990,18 +2015,18 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               eq(communities.status, "active"),
             )
           : body.data.targetType === "reply"
-          ? and(
-              eq(replies.id, body.data.targetId),
-              isNull(replies.deletedAt),
-              isNull(posts.deletedAt),
-              eq(communities.isPublic, true),
-              eq(communities.status, "active"),
-            )
-          : and(
-              eq(communities.id, body.data.targetId),
-              eq(communities.isPublic, true),
-              eq(communities.status, "active"),
-            );
+            ? and(
+                eq(replies.id, body.data.targetId),
+                isNull(replies.deletedAt),
+                isNull(posts.deletedAt),
+                eq(communities.isPublic, true),
+                eq(communities.status, "active"),
+              )
+            : and(
+                eq(communities.id, body.data.targetId),
+                eq(communities.isPublic, true),
+                eq(communities.status, "active"),
+              );
       const target =
         body.data.targetType === "post"
           ? await database
@@ -2012,19 +2037,19 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               .where(and(targetConditions, isNull(users.deletedAt)))
               .limit(1)
           : body.data.targetType === "reply"
-          ? await database
-              .select({ id: replies.id })
-              .from(replies)
-              .innerJoin(posts, eq(posts.id, replies.postId))
-              .innerJoin(communities, eq(communities.id, posts.communityId))
-              .innerJoin(users, eq(users.id, replies.authorId))
-              .where(and(targetConditions, isNull(users.deletedAt)))
-              .limit(1)
-          : await database
-              .select({ id: communities.id })
-              .from(communities)
-              .where(targetConditions)
-              .limit(1);
+            ? await database
+                .select({ id: replies.id })
+                .from(replies)
+                .innerJoin(posts, eq(posts.id, replies.postId))
+                .innerJoin(communities, eq(communities.id, posts.communityId))
+                .innerJoin(users, eq(users.id, replies.authorId))
+                .where(and(targetConditions, isNull(users.deletedAt)))
+                .limit(1)
+            : await database
+                .select({ id: communities.id })
+                .from(communities)
+                .where(targetConditions)
+                .limit(1);
       if (!target.length) {
         return reply.code(404).send({
           error: {
@@ -2666,14 +2691,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           "community banner",
         );
       }
-      const indexableCommunitySlug = await getIndexableCommunitySlug(result.community.id);
+      const indexableCommunitySlug = await getIndexableCommunitySlug(
+        result.community.id,
+      );
       const urls = [
         ...new Set(
           [indexableCommunitySlugBefore, indexableCommunitySlug]
             .filter((slug): slug is string => Boolean(slug))
-            .map((slug) =>
-              indexNowPageUrl(`/r/${encodeURIComponent(slug)}`),
-            ),
+            .map((slug) => indexNowPageUrl(`/r/${encodeURIComponent(slug)}`)),
         ),
       ];
       if (urls.length) {
@@ -3121,11 +3146,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     );
     if (wasIndexable || isIndexable) {
       notifyIndexNow(
-        [
-          indexNowPageUrl(
-            `/u/${encodeURIComponent(profile.username)}`,
-          ),
-        ],
+        [indexNowPageUrl(`/u/${encodeURIComponent(profile.username)}`)],
         environment.INDEXNOW_KEY,
         request.log,
         environment.NODE_ENV === "production",
@@ -3231,8 +3252,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
               payload: {
                 action: "follow",
                 actorUsername: followerProfile?.username ?? "member",
-                actorName:
-                  followerProfile?.displayName ?? "A community member",
+                actorName: followerProfile?.displayName ?? "A community member",
                 title: `${followerProfile?.displayName ?? "A community member"} started following you`,
                 detail: `@${followerProfile?.username ?? "member"} followed you.`,
               },
@@ -3909,7 +3929,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({
           error: {
             code: "INVALID_CHAT_AUDIO",
-            message: "Chat audio must be uploaded through the signed audio upload flow.",
+            message:
+              "Chat audio must be uploaded through the signed audio upload flow.",
           },
         });
       }
@@ -3960,7 +3981,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           .limit(1);
         if (!item) {
           return reply.code(404).send({
-            error: { code: "SHARED_POST_NOT_FOUND", message: "Post not found." },
+            error: {
+              code: "SHARED_POST_NOT_FOUND",
+              message: "Post not found.",
+            },
           });
         }
         sharedItem = item;
@@ -4000,6 +4024,43 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         sharedItem = item;
+      } else if (body.data.sharedItemType === "chat") {
+        const [item] = await database
+          .select({
+            id: communities.id,
+            slug: communities.slug,
+            name: communities.name,
+            description: communities.description,
+            avatarUrl: communities.avatarUrl,
+            memberCount: sql<number>`(
+              select count(*)::int from ${communityMemberships} share_member
+              where share_member.community_id = ${communities.id}
+            )`,
+            isJoined: sql<boolean>`exists (
+              select 1 from ${communityMemberships}
+              where ${communityMemberships.communityId} = ${communities.id}
+                and ${communityMemberships.userId} = ${userId}
+            )`,
+          })
+          .from(communities)
+          .where(
+            and(
+              eq(communities.slug, body.data.sharedItemId!),
+              eq(communities.isPublic, true),
+              eq(communities.chatEnabled, true),
+              eq(communities.status, "active"),
+            ),
+          )
+          .limit(1);
+        if (!item) {
+          return reply.code(404).send({
+            error: {
+              code: "SHARED_CHAT_NOT_FOUND",
+              message: "Public community chat not found.",
+            },
+          });
+        }
+        sharedItem = item;
       } else if (body.data.sharedItemType === "profile") {
         const [item] = await database
           .select({
@@ -4031,7 +4092,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           .limit(1);
         if (!item) {
           return reply.code(404).send({
-            error: { code: "SHARED_PROFILE_NOT_FOUND", message: "Profile not found." },
+            error: {
+              code: "SHARED_PROFILE_NOT_FOUND",
+              message: "Profile not found.",
+            },
           });
         }
         sharedItem = item;
@@ -4048,7 +4112,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             authorName: profiles.displayName,
           })
           .from(communityChatMessages)
-          .innerJoin(profiles, eq(profiles.userId, communityChatMessages.authorId))
+          .innerJoin(
+            profiles,
+            eq(profiles.userId, communityChatMessages.authorId),
+          )
           .where(
             and(
               eq(communityChatMessages.id, body.data.replyToId),
@@ -4077,8 +4144,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             body: body.data.body,
             mediaUrl: body.data.mediaUrl ?? null,
             mediaKind:
-              body.data.mediaKind ??
-              (body.data.mediaUrl ? "image_url" : null),
+              body.data.mediaKind ?? (body.data.mediaUrl ? "image_url" : null),
             replyToId: body.data.replyToId ?? null,
             sharedItemType: body.data.sharedItemType ?? null,
             sharedItemId: body.data.sharedItemId ?? null,
@@ -4202,8 +4268,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                 ),
               );
             const uniqueMentionRecipients = mentionedRecipients.filter(
-              ({ userId: recipientId }) =>
-                recipientId !== chatReplyRecipientId,
+              ({ userId: recipientId }) => recipientId !== chatReplyRecipientId,
             );
             if (uniqueMentionRecipients.length) {
               const createdNotifications = await transaction
@@ -4286,7 +4351,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .limit(1);
       if (!community) {
         return reply.code(404).send({
-          error: { code: "COMMUNITY_NOT_FOUND", message: "Community not found." },
+          error: {
+            code: "COMMUNITY_NOT_FOUND",
+            message: "Community not found.",
+          },
         });
       }
       const [membership] = await database
@@ -4306,7 +4374,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           community.creatorId !== userId)
       ) {
         return reply.code(403).send({
-          error: { code: "COMMUNITY_MODERATOR_REQUIRED", message: "Only owners and moderators can pin chat messages." },
+          error: {
+            code: "COMMUNITY_MODERATOR_REQUIRED",
+            message: "Only owners and moderators can pin chat messages.",
+          },
         });
       }
       const [message] = await database.transaction(async (transaction) => {
@@ -4345,7 +4416,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             communityId: community.id,
             targetType: "chat_message",
             targetId: updated.id,
-            action: body.data.pinned ? "chat_message_pinned" : "chat_message_unpinned",
+            action: body.data.pinned
+              ? "chat_message_pinned"
+              : "chat_message_unpinned",
             reason: body.data.pinned
               ? "Pinned a community chat message."
               : "Unpinned a community chat message.",
@@ -4362,7 +4435,10 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       });
       if (!message) {
         return reply.code(404).send({
-          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
         });
       }
       return { message: { id: message.id, isPinned: body.data.pinned } };
@@ -4394,20 +4470,31 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           createdAt: communityChatMessages.createdAt,
         })
         .from(communityChatMessages)
-        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
-        .innerJoin(communityMemberships, and(
-          eq(communityMemberships.communityId, communities.id),
-          eq(communityMemberships.userId, userId),
-        ))
-        .where(and(
-          eq(communityChatMessages.id, params.data.id),
-          eq(communities.slug, params.data.slug),
-          eq(communities.chatEnabled, true),
-        ))
+        .innerJoin(
+          communities,
+          eq(communities.id, communityChatMessages.communityId),
+        )
+        .innerJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.communityId, communities.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communities.slug, params.data.slug),
+            eq(communities.chatEnabled, true),
+          ),
+        )
         .limit(1);
       if (!message) {
         return reply.code(404).send({
-          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
         });
       }
       if (message.authorId !== userId) {
@@ -4446,10 +4533,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         .from(users)
         .innerJoin(profiles, eq(profiles.userId, users.id))
         .innerJoin(communities, eq(communities.id, message.communityId))
-        .leftJoin(communityMemberships, and(
-          eq(communityMemberships.communityId, message.communityId),
-          eq(communityMemberships.userId, users.id),
-        ))
+        .leftJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.communityId, message.communityId),
+            eq(communityMemberships.userId, users.id),
+          ),
+        )
         .where(eq(users.id, userId))
         .limit(1);
       return {
@@ -4461,11 +4551,14 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             ...author,
             role: chatAuthorRole({
               userId,
-              creatorId: (await database
-                .select({ creatorId: communities.creatorId })
-                .from(communities)
-                .where(eq(communities.id, message.communityId))
-                .limit(1))[0]?.creatorId ?? "",
+              creatorId:
+                (
+                  await database
+                    .select({ creatorId: communities.creatorId })
+                    .from(communities)
+                    .where(eq(communities.id, message.communityId))
+                    .limit(1)
+                )[0]?.creatorId ?? "",
               role: author?.role ?? "member",
             }),
           },
@@ -4491,27 +4584,41 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           communityId: communityChatMessages.communityId,
         })
         .from(communityChatMessages)
-        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
-        .innerJoin(communityMemberships, and(
-          eq(communityMemberships.communityId, communities.id),
-          eq(communityMemberships.userId, userId),
-        ))
-        .where(and(
-          eq(communityChatMessages.id, params.data.id),
-          eq(communities.slug, params.data.slug),
-          eq(communities.chatEnabled, true),
-        ))
+        .innerJoin(
+          communities,
+          eq(communities.id, communityChatMessages.communityId),
+        )
+        .innerJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.communityId, communities.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communities.slug, params.data.slug),
+            eq(communities.chatEnabled, true),
+          ),
+        )
         .limit(1);
       if (!message) {
         return reply.code(404).send({
-          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
         });
       }
-      await database.insert(communityChatMessageReactions).values({
-        messageId: message.id,
-        userId,
-        emoji: body.data.emoji,
-      }).onConflictDoNothing();
+      await database
+        .insert(communityChatMessageReactions)
+        .values({
+          messageId: message.id,
+          userId,
+          emoji: body.data.emoji,
+        })
+        .onConflictDoNothing();
       await database.insert(outboxEvents).values({
         topic: "community.chat.message.reaction",
         communityId: message.communityId,
@@ -4549,27 +4656,42 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           communityId: communityChatMessages.communityId,
         })
         .from(communityChatMessages)
-        .innerJoin(communities, eq(communities.id, communityChatMessages.communityId))
-        .innerJoin(communityMemberships, and(
-          eq(communityMemberships.communityId, communities.id),
-          eq(communityMemberships.userId, userId),
-        ))
-        .where(and(
-          eq(communityChatMessages.id, params.data.id),
-          eq(communities.slug, params.data.slug),
-          eq(communities.chatEnabled, true),
-        ))
+        .innerJoin(
+          communities,
+          eq(communities.id, communityChatMessages.communityId),
+        )
+        .innerJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.communityId, communities.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communities.slug, params.data.slug),
+            eq(communities.chatEnabled, true),
+          ),
+        )
         .limit(1);
       if (!message) {
         return reply.code(404).send({
-          error: { code: "CHAT_MESSAGE_NOT_FOUND", message: "Chat message not found." },
+          error: {
+            code: "CHAT_MESSAGE_NOT_FOUND",
+            message: "Chat message not found.",
+          },
         });
       }
-      await database.delete(communityChatMessageReactions).where(and(
-        eq(communityChatMessageReactions.messageId, message.id),
-        eq(communityChatMessageReactions.userId, userId),
-        eq(communityChatMessageReactions.emoji, query.data.emoji),
-      ));
+      await database
+        .delete(communityChatMessageReactions)
+        .where(
+          and(
+            eq(communityChatMessageReactions.messageId, message.id),
+            eq(communityChatMessageReactions.userId, userId),
+            eq(communityChatMessageReactions.emoji, query.data.emoji),
+          ),
+        );
       await database.insert(outboxEvents).values({
         topic: "community.chat.message.reaction",
         communityId: message.communityId,
@@ -4606,21 +4728,29 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           displayName: profiles.displayName,
         })
         .from(communities)
-        .innerJoin(communityMemberships, and(
-          eq(communityMemberships.communityId, communities.id),
-          eq(communityMemberships.userId, userId),
-        ))
+        .innerJoin(
+          communityMemberships,
+          and(
+            eq(communityMemberships.communityId, communities.id),
+            eq(communityMemberships.userId, userId),
+          ),
+        )
         .innerJoin(profiles, eq(profiles.userId, userId))
-        .where(and(
-          eq(communities.slug, params.data.slug),
-          eq(communities.chatEnabled, true),
-          eq(communities.isPublic, true),
-          eq(communities.status, "active"),
-        ))
+        .where(
+          and(
+            eq(communities.slug, params.data.slug),
+            eq(communities.chatEnabled, true),
+            eq(communities.isPublic, true),
+            eq(communities.status, "active"),
+          ),
+        )
         .limit(1);
       if (!member) {
         return reply.code(403).send({
-          error: { code: "MEMBERSHIP_REQUIRED", message: "Join this community to use its chat." },
+          error: {
+            code: "MEMBERSHIP_REQUIRED",
+            message: "Join this community to use its chat.",
+          },
         });
       }
       await database.insert(outboxEvents).values({
@@ -4753,12 +4883,17 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         )
         .limit(1);
       const [targetMessage] = await database
-        .select({ id: communityChatMessages.id, authorId: communityChatMessages.authorId })
+        .select({
+          id: communityChatMessages.id,
+          authorId: communityChatMessages.authorId,
+        })
         .from(communityChatMessages)
-        .where(and(
-          eq(communityChatMessages.id, params.data.id),
-          eq(communityChatMessages.communityId, community.id),
-        ))
+        .where(
+          and(
+            eq(communityChatMessages.id, params.data.id),
+            eq(communityChatMessages.communityId, community.id),
+          ),
+        )
         .limit(1);
       if (!targetMessage) {
         return reply.code(404).send({
@@ -4778,7 +4913,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(403).send({
           error: {
             code: "CHAT_MESSAGE_DELETE_FORBIDDEN",
-            message: "Only the sender or a community moderator can delete this message.",
+            message:
+              "Only the sender or a community moderator can delete this message.",
           },
         });
       }
@@ -4933,7 +5069,8 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         return reply.code(400).send({
           error: {
             code: "INVALID_POST_AUDIO",
-            message: "Post audio must be uploaded through the signed audio upload flow.",
+            message:
+              "Post audio must be uploaded through the signed audio upload flow.",
           },
         });
       }
@@ -5127,9 +5264,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
                       postUrl: url ?? "",
                       mediaUrl:
                         body.data.kind === "image_url" ||
-                            body.data.kind === "video_url" ||
-                            body.data.kind === "audio_url"
-                          ? url ?? ""
+                        body.data.kind === "video_url" ||
+                        body.data.kind === "audio_url"
+                          ? (url ?? "")
                           : "",
                       mediaKind: body.data.kind,
                     },
@@ -5569,13 +5706,11 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ pinned });
   };
 
-  app.post(
-    "/api/v1/posts/:id/pin/:scope",
-    async (request, reply) => updatePostPin(request, reply, true),
+  app.post("/api/v1/posts/:id/pin/:scope", async (request, reply) =>
+    updatePostPin(request, reply, true),
   );
-  app.delete(
-    "/api/v1/posts/:id/pin/:scope",
-    async (request, reply) => updatePostPin(request, reply, false),
+  app.delete("/api/v1/posts/:id/pin/:scope", async (request, reply) =>
+    updatePostPin(request, reply, false),
   );
 
   app.post(
@@ -5996,7 +6131,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       params.data.id,
       communityId,
       body.data.direction,
-      { toggleCurrent: true },
+      {
+        toggleCurrent: true,
+      },
     );
     if (!result) {
       return reply.code(404).send({
@@ -6058,7 +6195,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       params.data.id,
       communityId,
       null,
-      { removeOnlyUp: true },
+      {
+        removeOnlyUp: true,
+      },
     );
     if (!result) {
       return reply.code(404).send({

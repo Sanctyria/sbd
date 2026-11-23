@@ -808,6 +808,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         avatarUrl: communities.avatarUrl,
         bannerUrl: communities.bannerUrl,
         creatorId: communities.creatorId,
+        isPublic: communities.isPublic,
         viewerRole: sql<string>`case
           when ${communities.creatorId} = ${viewerId} then 'owner'
           else ${communityMemberships.role}::text
