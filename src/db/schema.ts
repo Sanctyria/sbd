@@ -34,6 +34,7 @@ export const postKindEnum = pgEnum("post_kind", [
   "image_url",
   "video_url",
   "audio_url",
+  "book_url",
 ]);
 export const notificationTypeEnum = pgEnum("notification_type", [
   "reply",
@@ -425,6 +426,7 @@ export const posts = pgTable(
       .references(() => users.id, { onDelete: "restrict" }),
     kind: postKindEnum("kind").notNull().default("text"),
     isNews: boolean("is_news").notNull().default(false),
+    isMusic: boolean("is_music").notNull().default(false),
     body: text("body").notNull(),
     url: text("url"),
     audioCoverUrl: text("audio_cover_url"),

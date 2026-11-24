@@ -6,7 +6,7 @@ export type CloudinaryConfig = Pick<
   "CLOUDINARY_CLOUD_NAME" | "CLOUDINARY_API_KEY" | "CLOUDINARY_API_SECRET"
 >;
 
-export type CloudinaryResourceType = "image" | "video";
+export type CloudinaryResourceType = "image" | "video" | "raw";
 
 export function isCloudinaryConfigured(
   config: CloudinaryConfig,
@@ -55,7 +55,9 @@ export function cloudinaryPublicIdFromUrl(
   if (
     segments[0] !== cloudName ||
     segments[2] !== "upload" ||
-    (segments[1] !== "image" && segments[1] !== "video")
+    (segments[1] !== "image" &&
+      segments[1] !== "video" &&
+      segments[1] !== "raw")
   ) {
     return null;
   }
@@ -91,6 +93,20 @@ export function isAudioCloudinaryUploadFromFolder(
     ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac"].includes(format ?? "") &&
     cloudinaryPublicIdFromUrl(value, cloudName, expectedFolder)?.resourceType ===
       "video"
+  );
+}
+
+export function isPdfCloudinaryUploadFromFolder(
+  value: string | null | undefined,
+  cloudName: string | undefined,
+  expectedFolder: string,
+): boolean {
+  if (!value || !cloudName || !value.toLowerCase().endsWith(".pdf")) {
+    return false;
+  }
+  return (
+    cloudinaryPublicIdFromUrl(value, cloudName, expectedFolder)?.resourceType ===
+    "raw"
   );
 }
 

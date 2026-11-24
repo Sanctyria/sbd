@@ -145,7 +145,7 @@ const feedQuerySchema = pageQuerySchema
       .string()
       .regex(/^[a-z0-9][a-z0-9_-]{2,29}$/)
       .optional(),
-    media: z.enum(["video", "audio"]).optional(),
+    media: z.enum(["video", "audio", "music", "book"]).optional(),
   })
   .superRefine((query, context) => {
     if (query.scope === "community" && !query.community) {
@@ -220,6 +220,7 @@ type HotFeedCursor = {
 const moderatorSafePostFields = {
   kind: posts.kind,
   isNews: posts.isNews,
+  isMusic: posts.isMusic,
   body: sql<string>`case when ${posts.deletedByModerator} then '' else ${posts.body} end`,
   url: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.url} end`,
   audioCoverUrl: sql<string | null>`case when ${posts.deletedByModerator} then null else ${posts.audioCoverUrl} end`,
@@ -2352,6 +2353,10 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       );
     } else if (parsedQuery.data.media === "audio") {
       conditions.push(eq(posts.kind, "audio_url"));
+    } else if (parsedQuery.data.media === "music") {
+      conditions.push(and(eq(posts.kind, "audio_url"), eq(posts.isMusic, true))!);
+    } else if (parsedQuery.data.media === "book") {
+      conditions.push(eq(posts.kind, "book_url"));
     }
     if (parsedQuery.data.members === "only") {
       conditions.push(

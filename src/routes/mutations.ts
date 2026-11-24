@@ -24,6 +24,7 @@ import {
   cloudinarySignature,
   destroyCloudinaryAsset,
   isAudioCloudinaryUploadFromFolder,
+  isPdfCloudinaryUploadFromFolder,
   isCloudinaryConfigured,
 } from "../lib/cloudinary.js";
 import {
@@ -157,8 +158,16 @@ const communityImageSchema = z.union([
 export const postBodySchema = z
   .object({
     community: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-    kind: z.enum(["text", "link", "image_url", "video_url", "audio_url"]),
+    kind: z.enum([
+      "text",
+      "link",
+      "image_url",
+      "video_url",
+      "audio_url",
+      "book_url",
+    ]),
     isNews: z.boolean().default(false),
+    isMusic: z.boolean().default(false),
     body: z.string().trim().min(1, "Add text to explain the post.").max(1000),
     url: httpsUrlSchema.nullable().optional(),
     audioCoverUrl: httpsUrlSchema.nullable().optional(),
@@ -169,6 +178,27 @@ export const postBodySchema = z
         code: "custom",
         path: ["audioCoverUrl"],
         message: "Cover images can only be added to audio posts.",
+      });
+    }
+    if (value.isMusic && value.kind !== "audio_url") {
+      context.addIssue({
+        code: "custom",
+        path: ["isMusic"],
+        message: "Only audio posts can be tagged as music.",
+      });
+    }
+    if (value.isMusic && value.body.length > 80) {
+      context.addIssue({
+        code: "custom",
+        path: ["body"],
+        message: "Music titles must be 80 characters or fewer.",
+      });
+    }
+    if (value.kind === "book_url" && value.body.length > 120) {
+      context.addIssue({
+        code: "custom",
+        path: ["body"],
+        message: "Book names must be 120 characters or fewer.",
       });
     }
     if (!value.body && !value.url) {
@@ -410,6 +440,7 @@ export const uploadSignatureSchema = z
       "post-image",
       "post-video",
       "post-audio",
+      "post-book",
       "reply-attachment",
       "chat-image",
       "chat-audio",
@@ -1141,7 +1172,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
 
       const { purpose } = body.data;
       let folder: string;
-      let resourceType: "image" | "video";
+      let resourceType: "image" | "video" | "raw";
       let allowedFormats: string[];
       let maxBytes: number;
       if (purpose === "profile-avatar" || purpose === "profile-banner") {
@@ -1291,17 +1322,23 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
         resourceType =
           purpose === "post-video" || purpose === "post-audio"
             ? "video"
-            : "image";
+            : purpose === "post-book"
+              ? "raw"
+              : "image";
         allowedFormats =
           purpose === "post-audio"
             ? ["mp3", "wav", "aac", "m4a", "mp4", "ogg", "flac", "webm"]
-            : resourceType === "video"
+            : purpose === "post-book"
+              ? ["pdf"]
+              : resourceType === "video"
               ? ["mp4", "mov"]
               : ["jpg", "jpeg", "png", "webp"];
         maxBytes =
           purpose === "post-audio"
             ? 20 * 1024 * 1024
-            : resourceType === "video"
+            : purpose === "post-book"
+              ? 50 * 1024 * 1024
+              : resourceType === "video"
               ? 50 * 1024 * 1024
               : 10 * 1024 * 1024;
       } else {
@@ -5074,6 +5111,21 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           },
         });
       }
+      if (
+        body.data.kind === "book_url" &&
+        !isPdfCloudinaryUploadFromFolder(
+          body.data.url,
+          environment.CLOUDINARY_CLOUD_NAME,
+          `sanctyria/users/${userId}/posts/${community.id}`,
+        )
+      ) {
+        return reply.code(400).send({
+          error: {
+            code: "INVALID_BOOK_UPLOAD",
+            message: "Books must be uploaded as PDF files.",
+          },
+        });
+      }
       const idempotency = idempotencyContext(
         request,
         reply,
@@ -5118,6 +5170,7 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             authorId: userId,
             kind: body.data.kind,
             isNews: body.data.isNews,
+            isMusic: body.data.isMusic,
             body: body.data.body,
             url,
             audioCoverUrl: body.data.audioCoverUrl ?? null,

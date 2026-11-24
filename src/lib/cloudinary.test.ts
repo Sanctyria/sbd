@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAudioCloudinaryUploadFromFolder,
+  isPdfCloudinaryUploadFromFolder,
   cloudinaryPublicIdFromUrl,
   cloudinarySignature,
 } from "./cloudinary.js";
@@ -78,5 +79,29 @@ describe("Cloudinary public ID parsing", () => {
         "sanctyria/users/u/profile",
       ),
     ).toBeNull();
+  });
+
+  it("accepts only signed raw PDF assets from the expected folder", () => {
+    expect(
+      isPdfCloudinaryUploadFromFolder(
+        "https://res.cloudinary.com/demo/raw/upload/v123/sanctyria/users/u/posts/c/book.pdf",
+        "demo",
+        "sanctyria/users/u/posts/c",
+      ),
+    ).toBe(true);
+    expect(
+      isPdfCloudinaryUploadFromFolder(
+        "https://res.cloudinary.com/demo/image/upload/sanctyria/users/u/posts/c/book.pdf",
+        "demo",
+        "sanctyria/users/u/posts/c",
+      ),
+    ).toBe(false);
+    expect(
+      isPdfCloudinaryUploadFromFolder(
+        "https://res.cloudinary.com/demo/raw/upload/sanctyria/users/u/posts/c/book.txt",
+        "demo",
+        "sanctyria/users/u/posts/c",
+      ),
+    ).toBe(false);
   });
 });

@@ -56,9 +56,47 @@ describe("community mutation request schemas", () => {
         body: "A community audio clip",
         url: "https://res.cloudinary.com/demo/video/upload/audio.m4a",
       },
+      {
+        community: "worldbuilding",
+        kind: "audio_url",
+        body: "An original song",
+        url: "https://res.cloudinary.com/demo/video/upload/song.m4a",
+        isMusic: true,
+      },
+      {
+        community: "worldbuilding",
+        kind: "book_url",
+        body: "A short book title",
+        url: "https://res.cloudinary.com/demo/raw/upload/book.pdf",
+      },
     ]) {
       expect(postBodySchema.safeParse(post).success).toBe(true);
     }
+  });
+
+  it("limits music and book titles and only allows music on audio posts", () => {
+    const base = {
+      community: "worldbuilding",
+      kind: "audio_url",
+      body: "A song",
+      url: "https://res.cloudinary.com/demo/video/upload/song.m4a",
+      isMusic: true,
+    };
+    expect(postBodySchema.safeParse(base).success).toBe(true);
+    expect(
+      postBodySchema.safeParse({ ...base, body: "x".repeat(81) }).success,
+    ).toBe(false);
+    expect(
+      postBodySchema.safeParse({ ...base, kind: "text" }).success,
+    ).toBe(false);
+    expect(
+      postBodySchema.safeParse({
+        ...base,
+        kind: "book_url",
+        body: "x".repeat(121),
+        isMusic: false,
+      }).success,
+    ).toBe(false);
   });
 
   it("accepts text-only and image-only channel messages", () => {
@@ -125,6 +163,12 @@ describe("community mutation request schemas", () => {
         purpose: "post-audio",
         communitySlug: "worldbuilding",
         fileName: "My Song.m4a",
+      }).success,
+    ).toBe(true);
+    expect(
+      uploadSignatureSchema.safeParse({
+        purpose: "post-book",
+        communitySlug: "worldbuilding",
       }).success,
     ).toBe(true);
     expect(
