@@ -481,6 +481,7 @@ export const replies = pgTable(
     mediaUrl: text("media_url"),
     mediaKind: text("media_kind"),
     voteCount: integer("vote_count").notNull().default(0),
+    pinnedAt: timestamp("pinned_at", { withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     moderatorEdited: boolean("moderator_edited").notNull().default(false),
@@ -492,6 +493,9 @@ export const replies = pgTable(
   (table) => [
     index("replies_post_idx").on(table.postId, table.createdAt, table.id),
     index("replies_parent_idx").on(table.parentReplyId),
+    uniqueIndex("replies_post_pin_unique")
+      .on(table.postId)
+      .where(sql`${table.pinnedAt} is not null`),
   ],
 );
 

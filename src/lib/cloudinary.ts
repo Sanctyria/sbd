@@ -35,6 +35,13 @@ export function cloudinarySignature(
     .digest("hex");
 }
 
+export function cloudinaryRawPublicId(publicId: string, format: string): string {
+  const extension = format.toLowerCase();
+  return publicId.toLowerCase().endsWith(`.${extension}`)
+    ? publicId
+    : `${publicId}.${extension}`;
+}
+
 export function cloudinaryPublicIdFromUrl(
   value: string,
   cloudName: string,

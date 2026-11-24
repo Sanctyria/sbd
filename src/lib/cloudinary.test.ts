@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cloudinaryRawPublicId,
   isAudioCloudinaryUploadFromFolder,
   isPdfCloudinaryUploadFromFolder,
   cloudinaryPublicIdFromUrl,
@@ -7,6 +8,11 @@ import {
 } from "./cloudinary.js";
 
 describe("Cloudinary upload signing", () => {
+  it("adds the extension required by raw Cloudinary assets", () => {
+    expect(cloudinaryRawPublicId("book-id", "pdf")).toBe("book-id.pdf");
+    expect(cloudinaryRawPublicId("book-id.PDF", "pdf")).toBe("book-id.PDF");
+  });
+
   it("signs the canonical sorted upload parameters", () => {
     expect(
       cloudinarySignature(

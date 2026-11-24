@@ -21,6 +21,7 @@ import { environment } from "../config/env.js";
 import { database } from "../db/client.js";
 import { decodeCursor, encodeCursor } from "../lib/cursor.js";
 import {
+  cloudinaryRawPublicId,
   cloudinarySignature,
   destroyCloudinaryAsset,
   isAudioCloudinaryUploadFromFolder,
@@ -291,6 +292,7 @@ const chatReactionSchema = z
   .strict();
 const chatTypingSchema = z.object({ typing: z.boolean() }).strict();
 const chatPinSchema = z.object({ pinned: z.boolean() }).strict();
+const replyPinSchema = z.object({ pinned: z.boolean() }).strict();
 const chatReactionQuerySchema = z.object({
   emoji: z.string().trim().min(1).max(12),
 });
@@ -1400,7 +1402,9 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
           : null;
       const publicId = audioPublicIdPrefix
         ? `${audioPublicIdPrefix}--${randomUUID()}`
-        : randomUUID();
+        : purpose === "post-book"
+          ? cloudinaryRawPublicId(randomUUID(), "pdf")
+          : randomUUID();
       const parameters = {
         allowed_formats: allowedFormats.join(","),
         folder,
@@ -1883,6 +1887,80 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
     return { report: updatedReport };
   });
 
+  app.patch(
+    "/api/v1/posts/:postId/replies/:replyId/pin",
+    async (request, reply) => {
+      const userId = await authenticatedUserId(request, reply);
+      if (!userId) return;
+      const params = z
+        .object({ postId: z.string().uuid(), replyId: z.string().uuid() })
+        .safeParse(request.params);
+      const body = replyPinSchema.safeParse(request.body);
+      if (!params.success || !body.success) return invalidRequest(reply);
+
+      const result = await database.transaction(async (transaction) => {
+        const [post] = await transaction
+          .select({ id: posts.id, authorId: posts.authorId })
+          .from(posts)
+          .where(eq(posts.id, params.data.postId))
+          .for("update")
+          .limit(1);
+        if (!post) return { status: "missing_post" as const };
+        if (post.authorId !== userId) return { status: "forbidden" as const };
+
+        const [target] = await transaction
+          .select({ id: replies.id, pinnedAt: replies.pinnedAt })
+          .from(replies)
+          .where(
+            and(
+              eq(replies.id, params.data.replyId),
+              eq(replies.postId, post.id),
+              isNull(replies.parentReplyId),
+              isNull(replies.deletedAt),
+            ),
+          )
+          .for("update")
+          .limit(1);
+        if (!target) return { status: "missing_reply" as const };
+        if (body.data.pinned) {
+          await transaction
+            .update(replies)
+            .set({ pinnedAt: null })
+            .where(
+              and(eq(replies.postId, post.id), isNotNull(replies.pinnedAt)),
+            );
+        }
+        const [updated] = await transaction
+          .update(replies)
+          .set({ pinnedAt: body.data.pinned ? new Date() : null })
+          .where(eq(replies.id, target.id))
+          .returning({ id: replies.id, pinnedAt: replies.pinnedAt });
+        if (!updated) throw new Error("Pinned reply update returned no row.");
+        return { status: "ok" as const, reply: updated };
+      });
+
+      if (result.status === "missing_post" || result.status === "missing_reply") {
+        return reply.code(404).send({
+          error: {
+            code: "POST_OR_REPLY_NOT_FOUND",
+            message: "Post or reply not found.",
+          },
+        });
+      }
+      if (result.status === "forbidden") {
+        return reply.code(403).send({
+          error: {
+            code: "POST_AUTHOR_REQUIRED",
+            message: "Only the post author can pin a reply.",
+          },
+        });
+      }
+      return {
+        reply: { id: result.reply.id, isPinned: Boolean(result.reply.pinnedAt) },
+      };
+    },
+  );
+
   app.patch("/api/v1/notifications/:id", async (request, reply) => {
     const userId = await authenticatedUserId(request, reply);
     if (!userId) return;
@@ -1909,6 +1987,31 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
       });
     }
     return { notification };
+  });
+
+  app.delete("/api/v1/notifications/:id", async (request, reply) => {
+    const userId = await authenticatedUserId(request, reply);
+    if (!userId) return;
+    const params = idParamsSchema.safeParse(request.params);
+    if (!params.success) return invalidRequest(reply);
+    const [notification] = await database
+      .delete(notifications)
+      .where(
+        and(
+          eq(notifications.id, params.data.id),
+          eq(notifications.recipientId, userId),
+        ),
+      )
+      .returning({ id: notifications.id });
+    if (!notification) {
+      return reply.code(404).send({
+        error: {
+          code: "NOTIFICATION_NOT_FOUND",
+          message: "Notification not found.",
+        },
+      });
+    }
+    return reply.code(204).send();
   });
 
   app.post("/api/v1/notifications/read-all", async (request, reply) => {
@@ -4668,8 +4771,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             emoji: communityChatMessageReactions.emoji,
             count: sql<number>`count(*)::int`,
             reacted: sql<boolean>`bool_or(${communityChatMessageReactions.userId} = ${userId})`,
+            reactors: sql<string[]>`array_agg(${profiles.username} order by ${profiles.username})`,
           })
           .from(communityChatMessageReactions)
+          .innerJoin(
+            profiles,
+            eq(profiles.userId, communityChatMessageReactions.userId),
+          )
           .where(eq(communityChatMessageReactions.messageId, message.id))
           .groupBy(communityChatMessageReactions.emoji),
       };
@@ -4741,8 +4849,13 @@ export async function mutationRoutes(app: FastifyInstance): Promise<void> {
             emoji: communityChatMessageReactions.emoji,
             count: sql<number>`count(*)::int`,
             reacted: sql<boolean>`bool_or(${communityChatMessageReactions.userId} = ${userId})`,
+            reactors: sql<string[]>`array_agg(${profiles.username} order by ${profiles.username})`,
           })
           .from(communityChatMessageReactions)
+          .innerJoin(
+            profiles,
+            eq(profiles.userId, communityChatMessageReactions.userId),
+          )
           .where(eq(communityChatMessageReactions.messageId, message.id))
           .groupBy(communityChatMessageReactions.emoji),
       };

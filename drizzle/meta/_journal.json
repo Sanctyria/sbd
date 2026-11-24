@@ -267,6 +267,13 @@
       "when": 1795526403188,
       "tag": "0037_goofy_justin_hammer",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1795531011075,
+      "tag": "0038_lazy_kylun",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,9 @@ import { coreRoutes } from "./routes/core.js";
 const SESSION_CLEANUP_BATCH_SIZE = 1_000;
 const SESSION_CLEANUP_MAX_BATCHES = 10;
 const SESSION_CLEANUP_INTERVAL_MS = 60 * 60 * 1_000;
+const NOTIFICATION_CLEANUP_BATCH_SIZE = 5_000;
+const NOTIFICATION_CLEANUP_MAX_BATCHES = 10;
+const NOTIFICATION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1_000;
 
 export async function buildApp(
   config: Environment = environment,
@@ -155,9 +158,62 @@ export async function buildApp(
       : setInterval(runSessionCleanup, SESSION_CLEANUP_INTERVAL_MS);
   sessionCleanupTimer?.unref();
   runSessionCleanup();
+
+  let notificationCleanupTask: Promise<void> | undefined;
+  const cleanupNotifications = async () => {
+    let totalDeleted = 0;
+    for (let batch = 0; batch < NOTIFICATION_CLEANUP_MAX_BATCHES; batch += 1) {
+      const result = await pool.query(
+        `with ranked_notifications as (
+          select id, created_at,
+            row_number() over (
+              partition by recipient_id
+              order by created_at desc, id desc
+            ) as position
+          from notifications
+        ),
+        expired_notifications as (
+          select id
+          from ranked_notifications
+          where created_at < now() - interval '90 days' or position > 500
+          limit $1
+        )
+        delete from notifications
+        using expired_notifications
+        where notifications.id = expired_notifications.id`,
+        [NOTIFICATION_CLEANUP_BATCH_SIZE],
+      );
+      totalDeleted += result.rowCount ?? 0;
+      if ((result.rowCount ?? 0) < NOTIFICATION_CLEANUP_BATCH_SIZE) break;
+    }
+    if (totalDeleted > 0) {
+      app.log.info(
+        { deletedNotifications: totalDeleted },
+        "Expired notifications removed",
+      );
+    }
+  };
+  const runNotificationCleanup = () => {
+    if (config.NODE_ENV === "test" || notificationCleanupTask) return;
+    notificationCleanupTask = cleanupNotifications()
+      .catch((error: unknown) => {
+        app.log.error({ err: error }, "Notification cleanup failed");
+      })
+      .finally(() => {
+        notificationCleanupTask = undefined;
+      });
+  };
+  const notificationCleanupTimer =
+    config.NODE_ENV === "test"
+      ? undefined
+      : setInterval(runNotificationCleanup, NOTIFICATION_CLEANUP_INTERVAL_MS);
+  notificationCleanupTimer?.unref();
+  runNotificationCleanup();
   app.addHook("onClose", async () => {
     if (sessionCleanupTimer) clearInterval(sessionCleanupTimer);
+    if (notificationCleanupTimer) clearInterval(notificationCleanupTimer);
     await cleanupTask;
+    await notificationCleanupTask;
     await pool.end();
     if (config.SENTRY_DSN) await Sentry.flush(2_000);
   });

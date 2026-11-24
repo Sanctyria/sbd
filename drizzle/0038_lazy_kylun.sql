@@ -1,0 +1,2 @@
+ALTER TABLE "replies" ADD COLUMN "pinned_at" timestamp with time zone;--> statement-breakpoint
+CREATE UNIQUE INDEX "replies_post_pin_unique" ON "replies" USING btree ("post_id") WHERE "replies"."pinned_at" is not null;

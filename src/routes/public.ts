@@ -1079,18 +1079,27 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           end`,
           isPinned: sql<boolean>`${communityChatMessages.pinnedAt} is not null`,
           reactions: sql<
-            { emoji: string; count: number; reacted: boolean }[]
+            {
+              emoji: string;
+              count: number;
+              reacted: boolean;
+              reactors: string[];
+            }[]
           >`coalesce((
             select json_agg(json_build_object(
               'emoji', grouped.emoji,
               'count', grouped.count,
-              'reacted', grouped.reacted
+              'reacted', grouped.reacted,
+              'reactors', grouped.reactors
             ))
             from (
               select ${communityChatMessageReactions.emoji} as emoji,
                 count(*)::int as count,
-                bool_or(${communityChatMessageReactions.userId} = ${viewerId}) as reacted
+                bool_or(${communityChatMessageReactions.userId} = ${viewerId}) as reacted,
+                array_agg(${profiles.username} order by ${profiles.username}) as reactors
               from ${communityChatMessageReactions}
+              inner join ${profiles}
+                on ${profiles.userId} = ${communityChatMessageReactions.userId}
               where ${communityChatMessageReactions.messageId} = ${communityChatMessages.id}
               group by ${communityChatMessageReactions.emoji}
             ) grouped
@@ -2406,14 +2415,18 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
         )`,
       );
     }
-    if (parsedQuery.data.scope === "following" && viewerId) {
-      conditions.push(
-        sql`exists (
-            select 1 from ${communityMemberships}
-            where ${communityMemberships.communityId} = ${posts.communityId}
-              and ${communityMemberships.userId} = ${viewerId}
+    if (parsedQuery.data.scope === "following") {
+      if (!viewerId) {
+        conditions.push(sql`false`);
+      } else {
+        conditions.push(
+          sql`exists (
+            select 1 from ${userFollows}
+            where ${userFollows.followerId} = ${viewerId}
+              and ${userFollows.followedId} = ${posts.authorId}
           )`,
-      );
+        );
+      }
       personalized = true;
     }
     const cursor =
@@ -2622,11 +2635,14 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
     }
     if (cursor) {
       conditions.push(
-        or(
-          lt(replies.createdAt, cursor.createdAt),
-          and(
-            eq(replies.createdAt, cursor.createdAt),
-            lt(replies.id, cursor.id),
+        and(
+          isNull(replies.pinnedAt),
+          or(
+            lt(replies.createdAt, cursor.createdAt),
+            and(
+              eq(replies.createdAt, cursor.createdAt),
+              lt(replies.id, cursor.id),
+            ),
           ),
         )!,
       );
@@ -2652,6 +2668,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           string | null
         >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isPinned: sql<boolean>`${replies.pinnedAt} is not null`,
         isRemovedByModerator: replies.deletedByModerator,
         isEditedByModerator: replies.moderatorEdited,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
@@ -2703,7 +2720,11 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       .innerJoin(profiles, eq(profiles.userId, users.id))
       .innerJoin(posts, eq(posts.id, replies.postId))
       .where(and(...conditions))
-      .orderBy(desc(replies.createdAt), desc(replies.id))
+      .orderBy(
+        sql`${replies.pinnedAt} is not null desc`,
+        desc(replies.createdAt),
+        desc(replies.id),
+      )
       .limit(parsedQuery.data.limit + 1);
     const hasMore = rows.length > parsedQuery.data.limit;
     const items = hasMore ? rows.slice(0, parsedQuery.data.limit) : rows;
@@ -2848,6 +2869,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
           string | null
         >`case when ${replies.deletedAt} is null then ${replies.mediaKind} else null end`,
         removed: sql<boolean>`${replies.deletedAt} is not null`,
+        isPinned: sql<boolean>`${replies.pinnedAt} is not null`,
         isRemovedByModerator: replies.deletedByModerator,
         isEditedByModerator: replies.moderatorEdited,
         isPostAuthor: sql<boolean>`${replies.deletedAt} is null and ${replies.authorId} = ${posts.authorId}`,
