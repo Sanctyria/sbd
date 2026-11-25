@@ -246,7 +246,7 @@ Ember is derived from reactions to active posts and replies. The score uses `flo
 - Link previews only fetch HTTPS pages on publicly routable hosts and limit redirects, response size, and request time. Preview failures are returned explicitly rather than treated as valid metadata.
 - Passwords are stored as Argon2id hashes. Session tokens are stored hashed and sent using HTTP-only cookies.
 - Community and Core routes enforce their authorization rules in the API, independent of frontend visibility.
-- Permanent account deletion is implemented as irreversible anonymization to preserve referenced content and audit history. It is restricted to configured super administrators.
+- Account deletion is available to authenticated users through `DELETE /api/v1/me/account` and to configured super administrators through the Core user-management route. Deletion clears account credentials and personal data, transfers owned communities to an eligible member (or archives empty communities), and anonymizes authored content that must remain for references or audit history.
 - Expired sessions are purged in batches of up to 10,000 rows at startup and hourly. Each deletion batch is capped at 1,000 rows to avoid long-running cleanup statements.
 - The `/ready` endpoint depends on PostgreSQL; `/health` does not.
 

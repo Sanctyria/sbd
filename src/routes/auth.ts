@@ -18,6 +18,7 @@ import {
   users,
 } from "../db/schema.js";
 import { consumeAuthRateLimit, verifyTurnstile } from "../lib/authSecurity.js";
+import { deleteUserAccount } from "../lib/accountDeletion.js";
 import {
   AccountEmailDeliveryError,
   AccountEmailUnavailableError,
@@ -860,6 +861,39 @@ export async function authRoutes(
       return reply.code(202).send({ message: "Verification code sent." });
     },
   );
+
+  app.delete("/api/v1/me/account", async (request, reply) => {
+    if (!hasAllowedOrigin(request, reply, config)) return;
+    reply.header("cache-control", "no-store");
+    const userId = await currentSessionUserId(request, config);
+    if (!userId) {
+      return reply.code(401).send({
+        error: { code: "UNAUTHENTICATED", message: "Sign in to continue." },
+      });
+    }
+
+    const result = await deleteUserAccount({
+      targetId: userId,
+      actorId: userId,
+      source: "self",
+    });
+    if (result === "not-found") {
+      return reply.code(404).send({
+        error: { code: "NOT_FOUND", message: "The account could not be found." },
+      });
+    }
+    if (result === "invalid-state") {
+      return reply.code(409).send({
+        error: {
+          code: "INVALID_ACCOUNT_STATE",
+          message: "The account has already been deleted.",
+        },
+      });
+    }
+
+    reply.clearCookie(config.SESSION_COOKIE_NAME, cookieOptions(config));
+    return reply.code(204).send();
+  });
 
   app.delete("/api/v1/auth/session", async (request, reply) => {
     if (!hasAllowedOrigin(request, reply, config)) return;

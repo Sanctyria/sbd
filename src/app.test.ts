@@ -26,6 +26,22 @@ describe("community API", () => {
     expect(response.headers["x-content-type-options"]).toBe("nosniff");
   });
 
+  it("requires a valid session and allowed origin for account deletion", async () => {
+    const [unauthenticated, disallowedOrigin] = await Promise.all([
+      app.inject({ method: "DELETE", url: "/api/v1/me/account" }),
+      app.inject({
+        method: "DELETE",
+        url: "/api/v1/me/account",
+        headers: { origin: "https://not-sanctyria.example" },
+      }),
+    ]);
+
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.json().error.code).toBe("UNAUTHENTICATED");
+    expect(disallowedOrigin.statusCode).toBe(403);
+    expect(disallowedOrigin.json().error.code).toBe("ORIGIN_NOT_ALLOWED");
+  });
+
   it("rejects malformed cursors before querying the database", async () => {
     const response = await app.inject({
       method: "GET",
