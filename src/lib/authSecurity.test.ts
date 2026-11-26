@@ -1,10 +1,29 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import Fastify from "fastify";
+import {
+  afterAll,
+  afterEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 process.env.NODE_ENV = "test";
 process.env.DATABASE_URL ??= "postgresql://test:test@localhost:54329/sanctyria";
 
-const { verifyStripeSignature } = await import("./authSecurity.js");
+const { verifyStripeSignature, verifyTurnstile } = await import(
+  "./authSecurity.js"
+);
+const app = Fastify({ logger: false });
+
+afterAll(async () => {
+  await app.close();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("Stripe webhook signature verification", () => {
   const secret = "whsec_test_secret";
@@ -45,5 +64,59 @@ describe("Stripe webhook signature verification", () => {
     expect(
       verifyStripeSignature(payload, signature, secret, timestamp + 301),
     ).toBe(false);
+  });
+});
+
+describe("Turnstile hostname verification", () => {
+  it("accepts a hostname from the allowed web origins", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: true,
+            action: "signup",
+            hostname: "sanctity.sanctyria.com",
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(
+      verifyTurnstile(
+        "test-token",
+        { log: app.log },
+        "test-secret",
+        "signup",
+        ["sanctyria.com", "sanctity.sanctyria.com"],
+      ),
+    ).resolves.toBe("valid");
+  });
+
+  it("rejects a hostname outside the allowed web origins", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            success: true,
+            action: "signup",
+            hostname: "unrelated.example",
+          }),
+          { status: 200 },
+        ),
+      ),
+    );
+
+    await expect(
+      verifyTurnstile(
+        "test-token",
+        { log: app.log },
+        "test-secret",
+        "signup",
+        ["sanctyria.com", "sanctity.sanctyria.com"],
+      ),
+    ).resolves.toBe("invalid");
   });
 });

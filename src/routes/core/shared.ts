@@ -2,7 +2,10 @@ import { createHash } from "node:crypto";
 import { and, eq, gt, isNull } from "drizzle-orm";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { Environment } from "../../config/env.js";
+import {
+  isAllowedWebOrigin,
+  type Environment,
+} from "../../config/env.js";
 import { database } from "../../db/client.js";
 import { userSessions, users } from "../../db/schema.js";
 
@@ -68,7 +71,7 @@ export function hasAllowedOrigin(
   config: Environment,
 ): boolean {
   const origin = request.headers.origin;
-  if (!origin || origin === config.WEB_ORIGIN) return true;
+  if (isAllowedWebOrigin(config, origin)) return true;
   reply.code(403).send({
     error: {
       code: "ORIGIN_NOT_ALLOWED",

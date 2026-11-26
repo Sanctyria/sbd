@@ -4,7 +4,11 @@ import cookie from "@fastify/cookie";
 import helmet from "@fastify/helmet";
 import rateLimit, { normalizeIP } from "@fastify/rate-limit";
 import Fastify, { type FastifyInstance } from "fastify";
-import { environment, type Environment } from "./config/env.js";
+import {
+  environment,
+  getAllowedWebOrigins,
+  type Environment,
+} from "./config/env.js";
 import { pool } from "./db/client.js";
 import { pruneAuthRateLimits } from "./lib/authSecurity.js";
 import { authRoutes } from "./routes/auth.js";
@@ -107,7 +111,7 @@ export async function buildApp(
   await app.register(helmet);
   await app.register(cookie);
   await app.register(cors, {
-    origin: config.WEB_ORIGIN,
+    origin: getAllowedWebOrigins(config),
     credentials: true,
   });
   await app.register(rateLimit, {

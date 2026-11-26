@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { normalizeIP } from "@fastify/rate-limit";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { Environment } from "../config/env.js";
+import {
+  isAllowedWebOrigin,
+  type Environment,
+} from "../config/env.js";
 import { database } from "../db/client.js";
 import { paymentWebhookEvents } from "../db/schema.js";
 import { verifyStripeSignature } from "../lib/authSecurity.js";
@@ -49,7 +52,7 @@ function isAllowedOrigin(
   config: Environment,
 ): boolean {
   const origin = request.headers.origin;
-  if (!origin || origin === config.WEB_ORIGIN) return true;
+  if (isAllowedWebOrigin(config, origin)) return true;
   reply.code(403).send({
     error: {
       code: "ORIGIN_NOT_ALLOWED",

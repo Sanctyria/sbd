@@ -43,13 +43,17 @@ export async function consumeAuthRateLimit(
 
 export async function verifyTurnstile(
   token: string | undefined,
-  request: FastifyRequest,
+  request: Pick<FastifyRequest, "log">,
   secretKey: string | undefined,
   expectedAction: "signup" | "login",
-  expectedHostname: string,
+  expectedHostnames: string | readonly string[],
 ): Promise<"valid" | "missing" | "invalid" | "unavailable"> {
   if (!secretKey) return "valid";
   if (!token) return "missing";
+  const allowedHostnames =
+    typeof expectedHostnames === "string"
+      ? [expectedHostnames]
+      : expectedHostnames;
 
   let response: Response;
   try {
@@ -89,7 +93,7 @@ export async function verifyTurnstile(
   if (!result?.success) return "invalid";
   if (
     result.action !== expectedAction ||
-    result.hostname !== expectedHostname
+    !allowedHostnames.includes(result.hostname ?? "")
   ) {
     return "invalid";
   }

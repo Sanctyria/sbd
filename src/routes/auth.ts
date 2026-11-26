@@ -4,7 +4,12 @@ import { normalizeIP } from "@fastify/rate-limit";
 import { and, eq, gt, isNotNull, isNull, or, sql } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { environment, type Environment } from "../config/env.js";
+import {
+  environment,
+  getAllowedWebHostnames,
+  isAllowedWebOrigin,
+  type Environment,
+} from "../config/env.js";
 import { database } from "../db/client.js";
 import {
   communities,
@@ -147,7 +152,7 @@ function hasAllowedOrigin(
   config: Environment,
 ): boolean {
   const origin = request.headers.origin;
-  if (!origin || origin === config.WEB_ORIGIN) return true;
+  if (isAllowedWebOrigin(config, origin)) return true;
   reply.code(403).send({
     error: {
       code: "ORIGIN_NOT_ALLOWED",
@@ -216,7 +221,7 @@ export async function authRoutes(
         request,
         config.TURNSTILE_SECRET_KEY,
         "signup",
-        new URL(config.WEB_ORIGIN).hostname,
+        getAllowedWebHostnames(config),
       );
       if (turnstileResult !== "valid") {
         const unavailable = turnstileResult === "unavailable";
@@ -577,7 +582,7 @@ export async function authRoutes(
         request,
         config.TURNSTILE_SECRET_KEY,
         "login",
-        new URL(config.WEB_ORIGIN).hostname,
+        getAllowedWebHostnames(config),
       );
       if (turnstileResult !== "valid") {
         const unavailable = turnstileResult === "unavailable";

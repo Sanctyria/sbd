@@ -17,7 +17,10 @@ import {
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { database } from "../db/client.js";
-import { environment } from "../config/env.js";
+import {
+  environment,
+  getAllowedWebHostnames,
+} from "../config/env.js";
 import {
   fetchLinkPreview,
   type LinkPreviewMetadata,
@@ -371,7 +374,7 @@ export async function publicRoutes(app: FastifyInstance): Promise<void> {
       }
 
       const siteHosts = new Set([
-        new URL(environment.WEB_ORIGIN).hostname,
+        ...getAllowedWebHostnames(environment),
         "sanctyria.com",
         "www.sanctyria.com",
       ]);

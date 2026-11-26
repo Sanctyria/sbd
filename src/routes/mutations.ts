@@ -17,7 +17,7 @@ import {
 } from "drizzle-orm";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { environment } from "../config/env.js";
+import { environment, isAllowedWebOrigin } from "../config/env.js";
 import { database } from "../db/client.js";
 import { decodeCursor, encodeCursor } from "../lib/cursor.js";
 import {
@@ -712,7 +712,7 @@ async function authenticatedUserId(
   reply: FastifyReply,
 ): Promise<string | null> {
   const origin = request.headers.origin;
-  if (origin && origin !== environment.WEB_ORIGIN) {
+  if (!isAllowedWebOrigin(environment, origin)) {
     reply.code(403).send({
       error: {
         code: "ORIGIN_NOT_ALLOWED",

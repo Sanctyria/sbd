@@ -1,6 +1,22 @@
 import "dotenv/config";
 import { z } from "zod";
 
+const webOriginSchema = z
+  .string()
+  .url()
+  .refine((value) => {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.pathname === "/" &&
+      !url.search &&
+      !url.hash &&
+      !url.username &&
+      !url.password
+    );
+  }, "Must be an HTTP(S) origin without a path.")
+  .transform((value) => new URL(value).origin);
+
 const environmentSchema = z
   .object({
     NODE_ENV: z
@@ -9,6 +25,17 @@ const environmentSchema = z
     HOST: z.string().default("127.0.0.1"),
     PORT: z.coerce.number().int().min(1).max(65535).default(3000),
     WEB_ORIGIN: z.string().url().default("http://localhost:5173"),
+    WEB_ALLOWED_ORIGINS: z
+      .string()
+      .default("https://sanctity.sanctyria.com")
+      .transform((value) =>
+        value
+          .split(",")
+          .map((origin) => origin.trim())
+          .filter(Boolean),
+      )
+      .pipe(z.array(webOriginSchema))
+      .transform((origins) => [...new Set(origins)]),
     TRUST_PROXY: z
       .string()
       .default("127.0.0.1,::1")
@@ -236,3 +263,24 @@ const environmentSchema = z
 export const environment = environmentSchema.parse(process.env);
 
 export type Environment = z.infer<typeof environmentSchema>;
+
+export function getAllowedWebOrigins(
+  config: Pick<Environment, "WEB_ORIGIN" | "WEB_ALLOWED_ORIGINS">,
+): string[] {
+  return [
+    ...new Set([new URL(config.WEB_ORIGIN).origin, ...config.WEB_ALLOWED_ORIGINS]),
+  ];
+}
+
+export function getAllowedWebHostnames(
+  config: Pick<Environment, "WEB_ORIGIN" | "WEB_ALLOWED_ORIGINS">,
+): string[] {
+  return getAllowedWebOrigins(config).map((origin) => new URL(origin).hostname);
+}
+
+export function isAllowedWebOrigin(
+  config: Pick<Environment, "WEB_ORIGIN" | "WEB_ALLOWED_ORIGINS">,
+  origin: string | undefined,
+): boolean {
+  return origin === undefined || getAllowedWebOrigins(config).includes(origin);
+}

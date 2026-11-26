@@ -42,6 +42,38 @@ describe("community API", () => {
     expect(disallowedOrigin.json().error.code).toBe("ORIGIN_NOT_ALLOWED");
   });
 
+  it("allows the Sanctity subdomain for CORS and protected mutations", async () => {
+    const origin = "https://sanctity.sanctyria.com";
+    const [preflight, unauthenticated, invalidSignup] = await Promise.all([
+      app.inject({
+        method: "OPTIONS",
+        url: "/api/v1/me/account",
+        headers: {
+          origin,
+          "access-control-request-method": "DELETE",
+        },
+      }),
+      app.inject({
+        method: "DELETE",
+        url: "/api/v1/me/account",
+        headers: { origin },
+      }),
+      app.inject({
+        method: "POST",
+        url: "/api/v1/auth/signup",
+        headers: { origin },
+        payload: {},
+      }),
+    ]);
+
+    expect(preflight.statusCode).toBe(204);
+    expect(preflight.headers["access-control-allow-origin"]).toBe(origin);
+    expect(unauthenticated.statusCode).toBe(401);
+    expect(unauthenticated.json().error.code).toBe("UNAUTHENTICATED");
+    expect(invalidSignup.statusCode).toBe(400);
+    expect(invalidSignup.json().error.code).toBe("INVALID_REQUEST");
+  });
+
   it("rejects malformed cursors before querying the database", async () => {
     const response = await app.inject({
       method: "GET",
